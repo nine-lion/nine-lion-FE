@@ -1,4 +1,5 @@
 import Image from 'next/image';
+import Link from 'next/link';
 import { getSocialLoginUrl } from '@/lib/api/auth';
 
 const buttonClassName =
@@ -7,7 +8,7 @@ const buttonClassName =
 export function SocialLoginButtons() {
   return (
     <div className="mt-8 flex justify-center gap-8">
-      <a
+      <Link
         href={getSocialLoginUrl('google')}
         className={buttonClassName}
         aria-label="구글 로그인"
@@ -19,7 +20,7 @@ export function SocialLoginButtons() {
           height={40}
           className="pointer-events-none"
         />
-      </a>
+      </Link>
       <a
         href={getSocialLoginUrl('kakao')}
         className={buttonClassName}
