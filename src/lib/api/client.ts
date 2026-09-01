@@ -1,4 +1,7 @@
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? '';
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? '').replace(
+  /\/+$/,
+  '',
+);
 
 export class ApiError extends Error {
   status: number;
@@ -13,7 +16,13 @@ export class ApiError extends Error {
 }
 
 export function getApiUrl(path: string): string {
-  return `${API_BASE_URL}${path}`;
+  const normalized = path.startsWith('/') ? path : `/${path}`;
+
+  if (typeof window === 'undefined') {
+    return `${API_BASE_URL}${normalized}`;
+  }
+
+  return `/api${normalized}`;
 }
 
 function extractErrorMessage(body: unknown): string {
@@ -42,6 +51,20 @@ function extractErrorMessage(body: unknown): string {
   return '요청 처리 중 오류가 발생했습니다.';
 }
 
+async function parseBody(response: Response): Promise<unknown> {
+  const text = await response.text();
+
+  if (!text) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(getApiUrl(path), {
     ...init,
@@ -52,14 +75,11 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     },
   });
 
+  const body = await parseBody(response);
+
   if (!response.ok) {
-    const body = await response.json().catch(() => null);
     throw new ApiError(extractErrorMessage(body), response.status, body);
   }
 
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  return (await response.json()) as T;
+  return body as T;
 }
