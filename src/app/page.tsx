@@ -48,7 +48,6 @@ import {
   createGoal,
   createGoalFromVoice,
   deleteGoal as deleteGoalApi,
-  fetchHealth,
   listGoals,
   type GoalRead,
   type VoiceGoalResponse,
@@ -181,40 +180,6 @@ function useScheduleVoiceCapture(handlers: {
 
 type GoalFormValues = { exam: string; date: string; scope: string; target: string };
 const emptyGoalForm = (): GoalFormValues => ({ exam: '', date: '', scope: '', target: '' });
-
-function ConnectionBanner() {
-  const [health, setHealth] = useState<Awaited<ReturnType<typeof fetchHealth>>>(null);
-
-  useEffect(() => {
-    let active = true;
-    const poll = async () => {
-      const result = await fetchHealth();
-      if (active) setHealth(result);
-    };
-    void poll();
-    const id = window.setInterval(poll, 30_000);
-    return () => {
-      active = false;
-      window.clearInterval(id);
-    };
-  }, []);
-
-  if (!health) {
-    return <p className="text-caption text-muted-foreground">백엔드 연결을 확인하는 중...</p>;
-  }
-  if (!health.openai_configured) {
-    return (
-      <p className="text-caption text-warning-foreground" role="status">
-        {`백엔드(v${health.version}) 연결됨 — OPENAI_API_KEY 미설정. 음성 인식이 동작하지 않습니다.`}
-      </p>
-    );
-  }
-  return (
-    <p className="text-caption text-muted-foreground" role="status">
-      {`백엔드 v${health.version} · STT=${health.stt.model}, 추출=${health.extractor.model}`}
-    </p>
-  );
-}
 
 const GOALS_QUERY_KEY = ['goals', 'list', 50] as const;
 
@@ -1326,9 +1291,6 @@ export default function Home() {
         </header>
         <div className="content-wrap">
           <TabsContent value="planner">
-            <div className="mb-4">
-              <ConnectionBanner />
-            </div>
             <PlannerTab key={accountKey} accountKey={accountKey} />
           </TabsContent>
           <TabsContent value="calendar">
