@@ -1,13 +1,15 @@
 'use client';
 
-import { FormEvent, useMemo, useState } from 'react';
-import { ArrowRight, BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, Plus, Send, Sparkles, Target, Trash2 } from 'lucide-react';
+import { FormEvent, useMemo, useState, useSyncExternalStore } from 'react';
+import Link from 'next/link';
+import { ArrowRight, BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, LogIn, LogOut, Send, Sparkles, Target, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
+import { isAuthenticated } from '@/lib/auth';
 
 type Goal = { id: number; exam: string; date: string; scope: string; target: string };
 type TimeBlock = { id: number; date: string; start: number; end: number; type: 'sleep' | 'study'; label: string };
@@ -304,6 +306,18 @@ function CalendarTab() {
   );
 }
 
+const noopSubscribe = () => () => {};
+const getServerAuthSnapshot = () => false;
+
+function AuthButton() {
+  const loggedIn = useSyncExternalStore(noopSubscribe, isAuthenticated, getServerAuthSnapshot);
+  return loggedIn ? (
+    <Button asChild className="quick-add" size="lg" variant="outline"><a href="/auth/logout"><LogOut aria-hidden="true" /> 로그아웃</a></Button>
+  ) : (
+    <Button asChild className="quick-add" size="lg"><Link href="/login"><LogIn aria-hidden="true" /> 로그인</Link></Button>
+  );
+}
+
 export default function Home() {
-  return <main className="app-shell"><Tabs defaultValue="planner" className="app-tabs"><header className="topbar"><a href="#" className="brand" aria-label="Goalsetter 홈"><span className="brand-mark"><Clock3 aria-hidden="true" /></span><span>Goalsetter</span></a><TabsList className="main-nav" aria-label="주요 메뉴"><TabsTrigger value="planner"><Target aria-hidden="true" />목표 계획</TabsTrigger><TabsTrigger value="calendar"><CalendarDays aria-hidden="true" />타임 캘린더</TabsTrigger></TabsList><Button className="quick-add" size="lg"><Plus aria-hidden="true" /> 빠른 기록</Button></header><div className="content-wrap"><TabsContent value="planner"><PlannerTab /></TabsContent><TabsContent value="calendar"><CalendarTab /></TabsContent></div></Tabs></main>;
+  return <main className="app-shell"><Tabs defaultValue="planner" className="app-tabs"><header className="topbar"><a href="#" className="brand" aria-label="Goalsetter 홈"><span className="brand-mark"><Clock3 aria-hidden="true" /></span><span>Goalsetter</span></a><TabsList className="main-nav" aria-label="주요 메뉴"><TabsTrigger value="planner"><Target aria-hidden="true" />목표 계획</TabsTrigger><TabsTrigger value="calendar"><CalendarDays aria-hidden="true" />타임 캘린더</TabsTrigger></TabsList><AuthButton /></header><div className="content-wrap"><TabsContent value="planner"><PlannerTab /></TabsContent><TabsContent value="calendar"><CalendarTab /></TabsContent></div></Tabs></main>;
 }

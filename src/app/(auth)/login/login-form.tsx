@@ -6,6 +6,7 @@ import { type FormEvent, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { login } from '@/lib/api/auth';
 import { ApiError } from '@/lib/api/client';
+import { markAuthenticated } from '@/lib/auth';
 import { SocialLoginButtons } from '@/components/auth/social-login-buttons';
 
 const fieldClassName =
@@ -20,6 +21,7 @@ export function LoginForm() {
   const loginMutation = useMutation({
     mutationFn: login,
     onSuccess: () => {
+      markAuthenticated();
       router.push('/');
       router.refresh();
     },

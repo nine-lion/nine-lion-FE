@@ -1,4 +1,5 @@
 import { type NextRequest, NextResponse } from 'next/server';
+import { AUTH_STATUS_COOKIE } from '@/lib/auth';
 
 const ACCESS_TOKEN_COOKIE = 'access_token';
 
@@ -16,6 +17,14 @@ export async function GET(request: NextRequest) {
 
   response.cookies.set(ACCESS_TOKEN_COOKIE, accessToken, {
     httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    path: '/',
+    maxAge: 60 * 60 * 24 * 7,
+  });
+
+  response.cookies.set(AUTH_STATUS_COOKIE, '1', {
+    httpOnly: false,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
     path: '/',
