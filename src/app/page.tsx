@@ -19,7 +19,6 @@ const BLOCK_TYPE_LABEL: Record<BlockType, string> = { study: '공부', sleep: '�
 const KOREAN_DAYS = ['일', '월', '화', '수', '목', '금', '토'];
 const MONTHS = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8월', '9월', '10월', '11월', '12월'];
 const isoDate = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-const hourValue = (hour: string, minute: string) => Number(hour) + Number(minute || 0) / 60;
 const formatHour = (value: number) => `${String(Math.floor(value)).padStart(2, '0')}:${String(Math.round((value - Math.floor(value)) * 60)).padStart(2, '0')}`;
 
 const MINUTE_STEP = 5;
@@ -95,17 +94,56 @@ type ScheduleVoiceResult = { segments: { start: string; end: string; type: Block
 const useVoiceScheduleCapture = (onResult: (result: ScheduleVoiceResult) => void) =>
   useVoiceCapture<ScheduleVoiceResult>('/api/voice/schedule', onResult);
 
-function parseNaturalEntry(text: string, fallback: Date): Omit<TimeBlock, 'id'> | null {
-  const matches = [...text.matchAll(/(\d{1,2})(?::(\d{2}))?/g)];
-  if (matches.length < 2) return null;
-  const start = hourValue(matches[0][1], matches[0][2] ?? '0');
-  const end = hourValue(matches[1][1], matches[1][2] ?? '0');
-  if (start > 24 || end > 24 || start === end) return null;
+function toHourWithMeridiem(match: RegExpMatchArray): number {
+  const [, before, hourStr, minuteStr, after] = match;
+  const meridiem = (before || after || '').toLowerCase();
+  let hour = Number(hourStr);
+  if (meridiem === '오후' || meridiem === 'pm') {
+    if (hour < 12) hour += 12;
+  } else if (meridiem === '오전' || meridiem === 'am') {
+    if (hour === 12) hour = 0;
+  }
+  return hour + Number(minuteStr || 0) / 60;
+}
+
+function parseNaturalEntry(text: string, fallback: Date): Omit<TimeBlock, 'id'>[] | null {
   const entryDate = new Date(fallback);
-  if (/어제|yesterday/i.test(text)) entryDate.setDate(entryDate.getDate() - 1);
-  if (/내일|tomorrow/i.test(text)) entryDate.setDate(entryDate.getDate() + 1);
-  const type: BlockType = /수면|잠|잤|sleep/i.test(text) ? 'sleep' : /밥|식사|쉬|휴식|rest/i.test(text) ? 'rest' : 'study';
-  return { date: isoDate(entryDate), start, end: end < start ? 24 : end, type, label: BLOCK_TYPE_LABEL[type] };
+  let remaining = text;
+
+  const koreanDateMatch = remaining.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
+  const isoDateMatch = !koreanDateMatch ? remaining.match(/(\d{4})[-.\/](\d{1,2})[-.\/](\d{1,2})/) : null;
+  if (koreanDateMatch) {
+    entryDate.setMonth(Number(koreanDateMatch[1]) - 1, Number(koreanDateMatch[2]));
+    remaining = remaining.replace(koreanDateMatch[0], ' ');
+  } else if (isoDateMatch) {
+    entryDate.setFullYear(Number(isoDateMatch[1]), Number(isoDateMatch[2]) - 1, Number(isoDateMatch[3]));
+    remaining = remaining.replace(isoDateMatch[0], ' ');
+  }
+
+  if (/어제|yesterday/i.test(remaining)) entryDate.setDate(entryDate.getDate() - 1);
+  if (/내일|tomorrow/i.test(remaining)) entryDate.setDate(entryDate.getDate() + 1);
+
+  const timeMatches = [...remaining.matchAll(/(오전|오후|am|pm)?\s*(\d{1,2})(?::(\d{2}))?\s*(오전|오후|am|pm)?/gi)];
+  if (timeMatches.length < 2) return null;
+  const start = toHourWithMeridiem(timeMatches[0]);
+  const end = toHourWithMeridiem(timeMatches[1]);
+  if (start > 24 || end > 24 || start === end) return null;
+
+  const type: BlockType = /수면|잠|잔|잤|sleep/i.test(text) ? 'sleep' : /밥|식사|쉬|휴식|rest/i.test(text) ? 'rest' : 'study';
+  const label = BLOCK_TYPE_LABEL[type];
+
+  if (end > start) {
+    return [{ date: isoDate(entryDate), start, end, type, label }];
+  }
+
+  // Overnight span (e.g. 오후 11시~오전 6시): a block can't cross midnight in this
+  // data model, so split it into the tail of this day and the start of the next.
+  const nextDay = new Date(entryDate);
+  nextDay.setDate(nextDay.getDate() + 1);
+  return [
+    { date: isoDate(entryDate), start, end: 24, type, label },
+    { date: isoDate(nextDay), start: 0, end, type, label },
+  ];
 }
 
 const DEFAULT_GOALS: Goal[] = [{ id: 1, exam: '일반기계기사 필기', date: '2026-09-26', scope: '재료역학 · 기계열역학 · 기계유체역학 · 기계재료 및 유압기기', target: '기출 7개년 2회독 + 오답노트 완성' }];
@@ -464,7 +502,15 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
     event.preventDefault(); const parsed = parseNaturalEntry(prompt, today);
     if (!parsed) { setMessage('시간 두 개를 포함해 적어주세요. 예: 오늘 19:00~22:00 공부'); return; }
     setUndoSnapshot(null);
-    setBlocks((previous) => [...previous, { ...parsed, id: Date.now() }]); setPrompt(''); setMessage(`${parsed.label} ${formatHour(parsed.start)}–${formatHour(parsed.end)} 기록을 추가했어요.`);
+    const baseId = Date.now();
+    const newEntries: TimeBlock[] = parsed.map((entry, index) => ({ ...entry, id: baseId + index }));
+    setBlocks((previous) => [...previous, ...newEntries]);
+    setPrompt('');
+    setMessage(
+      parsed.length > 1
+        ? `${parsed[0].label} ${formatHour(parsed[0].start)}–자정을 넘어 ${formatHour(parsed[1].end)}까지 기록을 추가했어요.`
+        : `${parsed[0].label} ${formatHour(parsed[0].start)}–${formatHour(parsed[0].end)} 기록을 추가했어요.`,
+    );
   };
   const editingBlock = blocks.find((block) => block.id === editingId) ?? null;
   const updateBlock = (id: number, patch: Omit<TimeBlock, 'id' | 'date'>) => {
