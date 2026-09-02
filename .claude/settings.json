@@ -1,5 +1,5 @@
-{
+﻿{
   "enabledPlugins": {
-    "dev-kit-lite@dev-kit-lite": true
+    "dev-kit-lite@dev-kit-lite": false
   }
 }

@@ -1,0 +1,45 @@
+﻿{
+  "version": 1,
+  "updated_at": "2026-09-02T07:15:06Z",
+  "migrated_from": {
+    "detected_at": "2026-09-02T07:15:06Z",
+    "setup_kind": "single-repo",
+    "prior_tooling": ["eslint", "tailwindcss", "shadcn/radix-ui", "next.js app router", "react-hook-form", "zod", "tanstack-query"],
+    "coexistence_notes": "Migrated in conservative mode (dev-kit-lite v0.1.0): only this file and migration-report.md were written. No hooks, no rules files, no AGENTS.md/CLAUDE.md changes. Solo-author repo (1 person, committing as both 'kimhyunjoo' and 'hyunjoo')."
+  },
+  "roles": {
+    "planner": {
+      "headcount": 1,
+      "owns_paths": [],
+      "boundary_notes": "Mandatory role per taxonomy. No dedicated PM artifacts detected in-repo (no PRD.md, no phases/). The solo developer currently fills this role implicitly."
+    },
+    "frontend": {
+      "tech_stack": "nextjs-app-router",
+      "owns_paths": ["src/app/", "src/components/", "src/lib/"],
+      "recent_contributors": [
+        { "name": "kimhyunjoo", "commits": 15 },
+        { "name": "hyunjoo", "commits": 2 }
+      ],
+      "confidence": "HIGH",
+      "boundary_notes": "Detected via next.config.ts + src/app/ App Router layout (route group (auth)/, api/ route handlers, auth/ callback routes). Owns the full src/ tree - no separate state-management or design-system package detected in this repo."
+    },
+    "backend": {
+      "tech_stack": null,
+      "owns_paths": [],
+      "confidence": "N/A",
+      "boundary_notes": "README's Tech Stack section declares a Python backend, but no backend code, requirements.txt, or pyproject.toml exists in this repo. The '-fe' repo name suffix suggests a sibling backend repo (e.g. nine-lion-be) outside this working directory. Re-run migrate from that repo, or re-run here as multi-repo once both repos are checked out side by side."
+    },
+    "ai": {
+      "tech_stack": null,
+      "owns_paths": [],
+      "confidence": "N/A",
+      "boundary_notes": "README declares OpenAI GPT + Speech-to-Text usage, but no AI/LLM SDK dependency or prompts/ directory exists in this repo's package.json or src/. Likely lives in the backend repo."
+    },
+    "design": {
+      "tech_stack": null,
+      "owns_paths": [],
+      "confidence": "N/A",
+      "boundary_notes": "No design/, tokens/, or figma-export/ directory and no Figma URL found in README. Orphaned - no dedicated design role detected in this repo."
+    }
+  }
+}

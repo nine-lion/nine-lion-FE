@@ -11,7 +11,15 @@ const DEFAULT_LABEL: Record<BlockType, string> = { study: '공부', sleep: '수�
 function buildSchedulePrompt(referenceDate: string) {
   return `You extract a day's activity timeline from a Korean speech transcript for a study-planning calendar app.
 The entire recording describes activities on a single date: ${referenceDate} (YYYY-MM-DD).
-Break the narration into consecutive time segments in chronological order. Infer AM/PM from context when the speaker doesn't say it explicitly — segments described later in the narration happen later in the day unless the speaker clearly says otherwise.
+
+Your top priority is catching the speaker's real intent about *when* each activity happened — don't just pattern-match the numbers you hear:
+- If a duration is given instead of an end time (e.g. "3시간 동안 공부했어", "30분 정도 쉬었어"), compute the end time as start + duration.
+- If the speaker corrects or restates a time (e.g. "8시... 아니 9시부터 했어"), use the corrected value, not the first one mentioned.
+- If a time is relative to another segment ("한숨 자고 일어나서 바로 공부했어", "밥 먹고 나서 다시 시작했어"), infer it from that segment's boundary instead of inventing an unrelated time.
+- Infer AM/PM from context when the speaker doesn't say it explicitly, using typical daily rhythms (sleep at night, study during the day/evening) and the order activities are mentioned in.
+- Never fabricate a time that isn't actually supported by the transcript. If a segment's time genuinely cannot be determined, omit that segment rather than guessing.
+
+Break the narration into consecutive time segments in chronological order. Segments must not overlap — each one's start must be at or after the previous one's end.
 Classify each segment's "type" as one of: "study" (공부, 학습), "sleep" (수면, 잠), "rest" (식사, 휴식, 이동 등 그 외 활동).
 Round times to the nearest 5 minutes, formatted as 24-hour "HH:MM".
 Return strict JSON: {"segments": [{"start": "HH:MM", "end": "HH:MM", "type": "study"|"sleep"|"rest", "label": "짧은 한글 설명"}]}.
