@@ -460,7 +460,7 @@ function PlannerTab({ accountKey }: { accountKey: string }) {
         <p className="section-copy">
           시험명·시험일·범위·목표를 한 번에 말하면 자동으로 정리돼요. 빠진 항목만 직접 채워 저장하세요.
         </p>
-        <div className="flex items-center gap-3">
+        <div className="voice-input-bar flex items-center gap-3">
           <Button
             type="button"
             variant={voiceStatus === 'recording' ? 'destructive' : 'outline'}
