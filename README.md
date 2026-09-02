@@ -1,37 +1,286 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 📚 AI Study Coach
 
-## Getting Started
+> **AI가 목표 설정부터 학습 계획 생성, 공부 시간 기록, 학습 패턴 분석까지 함께하는 스마트 학습 코치**
 
-First, run the development server:
+---
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## 📖 프로젝트 소개
+
+Goalsetting은 시험을 준비하는 사용자를 위한 AI 기반 학습 관리 서비스입니다.
+
+사용자는 음성 또는 채팅으로 시험 정보를 간편하게 입력할 수 있으며, AI가 시험 정보를 분석하여 학습 계획을 자동 생성합니다.
+
+또한 공부 시간을 캘린더에 기록하면 AI가 사용자의 학습 패턴을 분석하여 더 효율적인 공부 방법과 일정 개선안을 제안합니다.
+
+---
+
+## ✨ 주요 기능
+
+### 🎯 목표 계획
+
+시험 목표를 쉽고 빠르게 등록할 수 있습니다.
+
+#### 🎙️ 음성 입력
+
+OpenAI Speech-to-Text를 활용하여 다음 정보를 음성으로 입력합니다.
+
+- 시험명
+- 시험일
+- 출제 범위
+- 목표
+
+예시
+
+> "정보처리기사 시험 준비할 거야. 시험은 10월 20일이고 운영체제, 네트워크, 데이터베이스를 공부해야 해."
+
+---
+
+#### 💬 AI 채팅 기반 정보 자동 입력
+
+채팅을 통해 시험 정보를 자동으로 수집합니다.
+
+예시
+
+```
+정보처리기사 출제 범위 알려줘
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+↓
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+AI가 검색을 통해
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- 시험 정보
+- 출제 범위
+- 과목
+- 중요도
 
-## Learn More
+등을 자동으로 입력합니다.
 
-To learn more about Next.js, take a look at the following resources:
+---
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### 📅 타임 캘린더
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+하루 공부 시간을 시각적으로 관리합니다.
 
-## Deploy on Vercel
+#### 🎤 음성으로 공부 기록
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+예시
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
-# nine-lion-FE
+```
+오늘 9시부터 11시까지 공부했고
+1시까지 점심 먹고 쉬다가
+8시까지 다시 공부했어.
+```
+
+↓
+
+AI가
+
+- 공부 시간
+- 휴식 시간
+- 식사 시간
+
+을 분석하여 Time Bar를 자동 생성합니다.
+
+---
+
+#### ✏️ Time Bar 직접 수정
+
+음성 입력 외에도 직접 수정할 수 있습니다.
+
+지원 예정 기능
+
+- Time Bar 클릭 후 시간 수정
+- 시간 입력 팝업
+- 5분 단위 조절
+- Undo 기능
+
+---
+
+#### 📌 개인 일정 등록
+
+고정 일정을 미리 등록합니다.
+
+예시
+
+- 출근
+- 학교
+- 통학
+- 운동
+- 아르바이트
+
+등록된 일정은 미래 캘린더에 자동 반영됩니다.
+
+AI는 이를 기반으로
+
+- 공부 가능한 시간
+- 수면 확보 시간
+
+을 미리 계산합니다.
+
+---
+
+### 🤖 AI 학습 분석
+
+누적된 학습 데이터를 분석하여 공부 습관을 개선합니다.
+
+분석 항목
+
+- 공부 시작 시간
+- 공부 종료 시간
+- 식사 시간
+- 휴식 시간
+- 수면 시간
+
+예시
+
+> 식사 시간이 평균 1시간 20분입니다.
+>
+> 50분으로 줄이면 하루 약 30분의 공부 시간을 추가로 확보할 수 있습니다.
+
+---
+
+### 🗓️ AI 학습 계획 생성
+
+시험 정보를 기반으로 AI가 학습 계획을 자동 생성합니다.
+
+반영 요소
+
+- 시험일까지 남은 기간
+- 출제 범위
+- 과목 중요도
+- 확보 가능한 공부 시간
+
+자동 생성
+
+- 일일 계획
+- 주간 계획
+- 과목별 학습 비율
+- 기출문제 일정
+- 복습 일정
+
+---
+
+## 🤖 AI 활용 기능
+
+| 기능 | 설명 |
+|------|------|
+| Speech-to-Text | 시험 정보 및 공부 기록 음성 입력 |
+| AI 채팅 | 시험 정보 및 출제 범위 자동 검색 |
+| 일정 생성 | 시험일까지 학습 계획 생성 |
+| 학습 분석 | 공부 습관 분석 및 개선안 제시 |
+| 일정 최적화 | 개인 일정 기반 공부 가능 시간 계산 |
+
+---
+
+## 🚀 서비스 플로우
+
+```text
+목표 설정
+      │
+      ▼
+음성 또는 채팅 입력
+      │
+      ▼
+AI가 시험 정보 분석
+      │
+      ▼
+학습 계획 자동 생성
+      │
+      ▼
+공부 시간 기록
+      │
+      ▼
+AI 학습 패턴 분석
+      │
+      ▼
+학습 계획 최적화
+```
+
+---
+
+## 🛠 Tech Stack
+
+### Frontend
+
+- Next.js
+- React
+- TypeScript
+- Tailwind CSS
+- Zustand
+
+### Backend
+
+- Python
+### AI
+
+- OpenAI GPT
+- OpenAI Speech-to-Text
+- Web Search
+
+---
+
+## 📂 프로젝트 구조
+
+```
+src
+├── app
+│   ├── (auth)
+│   │   ├── login
+│   │   │   ├── login-form.tsx
+│   │   │   └── page.tsx
+│   │   ├── signup
+│   │   │   └── page.tsx
+│   │   └── layout.tsx
+│   ├── api
+│   │   └── voice
+│   │       ├── goal
+│   │       │   └── route.ts
+│   │       └── schedule
+│   │           └── route.ts
+│   ├── auth
+│   │   ├── callback
+│   │   │   └── route.ts
+│   │   └── logout
+│   │       └── route.ts
+│   ├── layout.tsx
+│   ├── page.tsx
+│   └── providers.tsx
+├── components
+│   ├── auth
+│   │   ├── signup-form.tsx
+│   │   └── social-login-buttons.tsx
+│   └── ui
+├── lib
+│   ├── api
+│   │   ├── auth.ts
+│   │   └── client.ts
+│   ├── auth.ts
+│   ├── storage.ts
+│   └── utils.ts
+```
+
+---
+
+## 📌 개발 예정 기능
+
+- [ ] 목표 계획 음성 입력
+- [ ] AI 채팅 기반 시험 정보 자동 입력
+- [x] Time Bar 수동 수정
+- [ ] 음성 기반 공부 기록
+- [ ] Undo 기능
+- [ ] 개인 일정 등록
+- [ ] AI 학습 습관 분석
+- [ ] AI 일정 최적화
+- [ ] 시험 범위 기반 학습 계획 자동 생성
+- [ ] 도메인 연결 및 배포
+
+---
+
+## 💡 기대 효과
+
+- 시험 준비 과정을 체계적으로 관리
+- 수기 입력을 최소화한 편리한 UX
+- 실제 공부 시간을 기반으로 한 객관적인 분석
+- AI 기반 개인 맞춤형 학습 계획 제공
+- 꾸준한 학습 습관 형성 및 공부 효율 향상
