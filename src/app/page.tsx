@@ -56,8 +56,18 @@ import {
   type GoalRead,
   type VoiceGoalResponse,
 } from '@/lib/api/goals';
-import { createScheduleFromVoice, type VoiceScheduleResponse } from '@/lib/api/schedule';
+import { createScheduleFromVoice, parseScheduleText, type VoiceScheduleResponse } from '@/lib/api/schedule';
 import { loadJSON, saveJSON } from '@/lib/storage';
+import {
+  Bar,
+  BarChart,
+  Cell,
+  LabelList,
+  ResponsiveContainer,
+  Tooltip as RechartsTooltip,
+  XAxis,
+} from 'recharts';
+import type { TooltipContentProps } from 'recharts';
 
 type BlockType = 'sleep' | 'study' | 'rest';
 type TimeBlock = { id: number; date: string; start: number; end: number; type: BlockType; label: string };
@@ -209,6 +219,35 @@ function ConnectionBanner() {
   );
 }
 
+// Lightweight "here's what I heard" confirmation, shown after every voice
+// capture (goal + schedule) so the user can verify STT picked up the right
+// words — independent of whether the extracted data was complete enough to
+// need the heavier DraftConfirmDialog below.
+function VoiceTranscriptDialog({
+  result,
+  onClose,
+}: {
+  result: { transcript: string; message: string } | null;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog open={result !== null} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>음성 인식 결과</DialogTitle>
+          <DialogDescription>{result?.message}</DialogDescription>
+        </DialogHeader>
+        <p className="transcript-preview">{result?.transcript}</p>
+        <DialogFooter>
+          <Button type="button" onClick={onClose}>
+            확인
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function DraftConfirmDialog({
   initial,
   onCancel,
@@ -303,8 +342,8 @@ function DraftConfirmDialog({
           />
         </Field>
       </FieldGroup>
-      <details className="text-caption text-muted-foreground">
-        <summary className="cursor-pointer">원문 전사 보기</summary>
+      <details className="text-caption text-muted-foreground" open>
+        <summary className="cursor-pointer">원문 전사 (내가 말한 내용)</summary>
         <div className="mt-2 flex flex-col gap-2">
           <Textarea
             value={transcript}
@@ -364,6 +403,9 @@ function PlannerTab({ accountKey }: { accountKey: string }) {
     transcript: string;
     referenceDate: string;
   } | null>(null);
+  const [transcriptResult, setTranscriptResult] = useState<{ transcript: string; message: string } | null>(
+    null,
+  );
 
   const goalsQuery = useQuery({
     queryKey: GOALS_QUERY_KEY,
@@ -424,6 +466,10 @@ function PlannerTab({ accountKey }: { accountKey: string }) {
         setVoiceHint({
           kind: 'info',
           message: `음성으로 인식한 목표를 저장했어요. (신뢰도 ${(result.draft.confidence * 100).toFixed(0)}%)`,
+        });
+        setTranscriptResult({
+          transcript: result.transcript,
+          message: `이렇게 인식해서 목표를 저장했어요. (신뢰도 ${(result.draft.confidence * 100).toFixed(0)}%)`,
         });
         return;
       }
@@ -679,6 +725,7 @@ function PlannerTab({ accountKey }: { accountKey: string }) {
           )}
         </DialogContent>
       </Dialog>
+      <VoiceTranscriptDialog result={transcriptResult} onClose={() => setTranscriptResult(null)} />
     </div>
   );
 }
@@ -1102,62 +1149,73 @@ function TimeBlockCreateDialog({
   );
 }
 
-function toHourWithMeridiem(match: RegExpMatchArray): number {
-  const [, before, hourStr, minuteStr, after] = match;
-  const meridiem = (before || after || '').toLowerCase();
-  let hour = Number(hourStr);
-  if (meridiem === '오후' || meridiem === 'pm') {
-    if (hour < 12) hour += 12;
-  } else if (meridiem === '오전' || meridiem === 'am') {
-    if (hour === 12) hour = 0;
-  }
-  return hour + Number(minuteStr || 0) / 60;
+type WeeklyStudyPoint = { key: string; label: string; hours: number; isToday: boolean };
+
+// Sunday-start week, matching the calendar grid's own weekday header order.
+function useWeekStudyHours(blocks: TimeBlock[], today: Date): WeeklyStudyPoint[] {
+  return useMemo(() => {
+    const sunday = new Date(today);
+    sunday.setDate(today.getDate() - today.getDay());
+    const todayKey = isoDate(today);
+    return KOREAN_DAYS.map((label, index) => {
+      const date = new Date(sunday);
+      date.setDate(sunday.getDate() + index);
+      const key = isoDate(date);
+      const hours = blocks
+        .filter((block) => block.date === key && block.type === 'study')
+        .reduce((sum, block) => sum + (block.end - block.start), 0);
+      return { key, label, hours: Math.round(hours * 10) / 10, isToday: key === todayKey };
+    });
+  }, [blocks, today]);
 }
 
-function parseNaturalEntry(text: string, fallback: Date): Omit<TimeBlock, 'id'>[] | null {
-  const entryDate = new Date(fallback);
-  let remaining = text;
+function WeeklyChartTooltip({ active, payload }: TooltipContentProps) {
+  if (!active || !payload?.length) return null;
+  const point = payload[0]?.payload as WeeklyStudyPoint | undefined;
+  if (!point) return null;
+  return (
+    <div className="weekly-chart-tooltip">
+      <strong>{point.hours.toFixed(1)}h</strong>
+      <span>{`${point.label}요일 · ${point.key.slice(5).replace('-', '.')}`}</span>
+    </div>
+  );
+}
 
-  const koreanDateMatch = remaining.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
-  const isoDateMatch = !koreanDateMatch
-    ? remaining.match(/(\d{4})[-.\/](\d{1,2})[-.\/](\d{1,2})/)
-    : null;
-  if (koreanDateMatch) {
-    entryDate.setMonth(Number(koreanDateMatch[1]) - 1, Number(koreanDateMatch[2]));
-    remaining = remaining.replace(koreanDateMatch[0], ' ');
-  } else if (isoDateMatch) {
-    entryDate.setFullYear(Number(isoDateMatch[1]), Number(isoDateMatch[2]) - 1, Number(isoDateMatch[3]));
-    remaining = remaining.replace(isoDateMatch[0], ' ');
-  }
-
-  if (/어제|yesterday/i.test(remaining)) entryDate.setDate(entryDate.getDate() - 1);
-  if (/내일|tomorrow/i.test(remaining)) entryDate.setDate(entryDate.getDate() + 1);
-
-  const timeMatches = [
-    ...remaining.matchAll(/(오전|오후|am|pm)?\s*(\d{1,2})(?::(\d{2}))?\s*(오전|오후|am|pm)?/gi),
-  ];
-  if (timeMatches.length < 2) return null;
-  const start = toHourWithMeridiem(timeMatches[0]);
-  const end = toHourWithMeridiem(timeMatches[1]);
-  if (start > 24 || end > 24 || start === end) return null;
-
-  const type: BlockType = /수면|잠|잔|잤|sleep/i.test(text)
-    ? 'sleep'
-    : /밥|식사|쉬|휴식|rest/i.test(text)
-      ? 'rest'
-      : 'study';
-  const label = BLOCK_TYPE_LABEL[type];
-
-  if (end > start) {
-    return [{ date: isoDate(entryDate), start, end, type, label }];
-  }
-
-  const nextDay = new Date(entryDate);
-  nextDay.setDate(nextDay.getDate() + 1);
-  return [
-    { date: isoDate(entryDate), start, end: 24, type, label },
-    { date: isoDate(nextDay), start: 0, end, type, label },
-  ];
+function WeeklyStudyChart({ data }: { data: WeeklyStudyPoint[] }) {
+  const total = data.reduce((sum, point) => sum + point.hours, 0);
+  return (
+    <section className="weekly-chart" aria-label="이번 주 공부 시간">
+      <div className="weekly-chart-header">
+        <div>
+          <span className="eyebrow">THIS WEEK</span>
+          <h2>이번 주 공부 시간</h2>
+        </div>
+        <span className="weekly-chart-total">{total.toFixed(1)}h</span>
+      </div>
+      <ResponsiveContainer width="100%" height={132}>
+        <BarChart data={data} margin={{ top: 22, right: 6, left: 6, bottom: 0 }} barCategoryGap="30%">
+          <XAxis
+            dataKey="label"
+            axisLine={false}
+            tickLine={false}
+            tick={{ fill: 'var(--muted-foreground)', fontSize: 11, fontWeight: 700 }}
+          />
+          <RechartsTooltip cursor={{ fill: 'var(--accent)' }} content={WeeklyChartTooltip} />
+          <Bar dataKey="hours" radius={[4, 4, 0, 0]} maxBarSize={22} isAnimationActive={false}>
+            {data.map((point) => (
+              <Cell key={point.key} fill={point.isToday ? '#7c3aed' : '#c4b5fd'} />
+            ))}
+            <LabelList
+              dataKey="hours"
+              position="top"
+              formatter={(value) => (typeof value === 'number' && value > 0 ? `${value}h` : '')}
+              style={{ fill: 'var(--muted-foreground)', fontSize: 11, fontWeight: 700 }}
+            />
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </section>
+  );
 }
 
 function CalendarTab({ accountKey }: { accountKey: string }) {
@@ -1170,7 +1228,7 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
   const [creating, setCreating] = useState(false);
   const [createSessionId, setCreateSessionId] = useState(0);
   const [undoSnapshot, setUndoSnapshot] = useState<TimeBlock[] | null>(null);
-  const [voiceMessage, setVoiceMessage] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const blocksStorageKey = `goalsetter:${accountKey}:blocks`;
   const [blocks, setBlocks] = useState<TimeBlock[]>(() =>
     loadJSON(blocksStorageKey, DEFAULT_BLOCKS),
@@ -1194,26 +1252,39 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
       : view === 'quarter'
         ? `${month.getFullYear()}년 ${Math.floor(month.getMonth() / 3) + 1}분기`
         : `${month.getFullYear()}년 연력`;
-  const addNaturalEntry = (event: FormEvent) => {
+  const addNaturalEntry = async (event: FormEvent) => {
     event.preventDefault();
-    const parsed = parseNaturalEntry(prompt, today);
-    if (!parsed) {
-      setMessage('시간 두 개를 포함해 적어주세요. 예: 오늘 19:00~22:00 공부');
+    const text = prompt.trim();
+    if (!text) {
+      setMessage('오늘 한 일을 적거나 별 아이콘으로 말해주세요.');
       return;
     }
-    setUndoSnapshot(null);
-    const baseId = Date.now();
-    const newEntries: TimeBlock[] = parsed.map((entry, index) => ({
-      ...entry,
-      id: baseId + index,
-    }));
-    setBlocks((previous) => [...previous, ...newEntries]);
-    setPrompt('');
-    setMessage(
-      parsed.length > 1
-        ? `${parsed[0].label} ${formatHour(parsed[0].start)}–자정을 넘어 ${formatHour(parsed[1].end)}까지 기록을 추가했어요.`
-        : `${parsed[0].label} ${formatHour(parsed[0].start)}–${formatHour(parsed[0].end)} 기록을 추가했어요.`,
-    );
+    setSubmitting(true);
+    setMessage('');
+    try {
+      const result = await parseScheduleText(text, isoDate(today));
+      if (result.segments.length === 0) {
+        setMessage('시간 기록으로 인식하지 못했어요. 다른 표현으로 다시 적어주세요.');
+        return;
+      }
+      const baseId = Date.now();
+      const newBlocks: TimeBlock[] = result.segments.map((segment, index) => ({
+        id: baseId + index,
+        date: result.date,
+        start: timeValueToHour(segment.start),
+        end: timeValueToHour(segment.end),
+        type: segment.type,
+        label: segment.label,
+      }));
+      setUndoSnapshot(blocks);
+      setBlocks((previous) => [...previous, ...newBlocks]);
+      setPrompt('');
+      setMessage(`${newBlocks.length}개 기록을 추가했어요.`);
+    } catch (error) {
+      setMessage(error instanceof ApiError ? error.message : '기록 추가에 실패했어요.');
+    } finally {
+      setSubmitting(false);
+    }
   };
   const editingBlock = blocks.find((block) => block.id === editingId) ?? null;
   const updateBlock = (id: number, patch: Omit<TimeBlock, 'id' | 'date'>) => {
@@ -1236,40 +1307,28 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
     setCreating(false);
   };
 
-  const applyVoiceSchedule = useCallback(
-    (result: VoiceScheduleResponse) => {
-      if (result.segments.length === 0) {
-        setVoiceMessage('인식된 시간 기록이 없어요. 다시 말씀해주세요.');
-        return;
-      }
-      const baseId = Date.now();
-      const newBlocks: TimeBlock[] = result.segments.map((segment, index) => ({
-        id: baseId + index,
-        date: result.date,
-        start: timeValueToHour(segment.start),
-        end: timeValueToHour(segment.end),
-        type: segment.type,
-        label: segment.label,
-      }));
-      setUndoSnapshot(blocks);
-      setBlocks((previous) => [...previous, ...newBlocks]);
-      setVoiceMessage(`${newBlocks.length}개 기록을 추가했어요.`);
-    },
-    [blocks],
-  );
-  // Error text is already surfaced via the hook'''s own errorMessage
+  const applyVoiceTranscript = useCallback((result: VoiceScheduleResponse) => {
+    setPrompt(result.transcript);
+    setMessage(
+      result.transcript
+        ? '음성 인식 결과예요. 확인하고 전송을 눌러주세요.'
+        : '음성에서 문장을 인식하지 못했어요.',
+    );
+  }, []);
+  // Error text is already surfaced via the hook's own errorMessage
   // (rendered as voiceError below), so onError here is a no-op.
   const { status: voiceStatus, errorMessage: voiceError, start: startVoiceRaw, stop: stopVoice } =
-    useScheduleVoiceCapture({ onResult: applyVoiceSchedule, onError: () => {} });
+    useScheduleVoiceCapture({ onResult: applyVoiceTranscript, onError: () => {} });
   const startVoice = () => {
-    setVoiceMessage('');
+    setMessage('');
     startVoiceRaw();
   };
-  const undoVoiceSchedule = () => {
+  const weekData = useWeekStudyHours(blocks, today);
+  const undoLastEntry = () => {
     if (!undoSnapshot) return;
     setBlocks(undoSnapshot);
     setUndoSnapshot(null);
-    setVoiceMessage('방금 추가한 기록을 취소했어요.');
+    setMessage('방금 추가한 기록을 취소했어요.');
   };
   return (
     <section className="calendar-shell" aria-labelledby="calendar-heading">
@@ -1328,6 +1387,7 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
           </Button>
         </div>
       </div>
+      <WeeklyStudyChart data={weekData} />
       {view === 'month' ? (
         <TimeMonthGrid month={month} blocks={blocks} today={today} variant="month" onBlockClick={setEditingId} />
       ) : view === 'quarter' ? (
@@ -1348,12 +1408,12 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
       ) : (
         <YearMatrix year={month.getFullYear()} blocks={blocks} today={today} />
       )}
-      <form className="command-bar" onSubmit={addNaturalEntry}>
+      <form className="command-bar" onSubmit={(event) => void addNaturalEntry(event)}>
         <button
           type="button"
           className={`command-icon ${voiceStatus === 'recording' ? 'recording' : ''}`}
           aria-label={voiceStatus === 'recording' ? '녹음 중지' : '음성으로 기록 추가'}
-          disabled={voiceStatus === 'processing'}
+          disabled={voiceStatus === 'processing' || submitting}
           onClick={voiceStatus === 'recording' ? stopVoice : startVoice}
         >
           {voiceStatus === 'recording' ? <Square aria-hidden="true" /> : <Sparkles aria-hidden="true" />}
@@ -1368,15 +1428,41 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
             setPrompt(event.target.value);
             setMessage('');
           }}
-          placeholder={voiceStatus === 'recording' ? '녹음 중이에요. 오늘 한 일을 말해주세요...' : voiceStatus === 'processing' ? '인식 중...' : '예: 오늘 03:00부터 08:00까지 잤어'}
+          placeholder={
+            voiceStatus === 'recording'
+              ? '녹음 중이에요. 오늘 한 일을 말해주세요...'
+              : voiceStatus === 'processing'
+                ? '인식 중...'
+                : '예: 오늘 03:00부터 08:00까지 잤어'
+          }
           disabled={voiceStatus === 'recording' || voiceStatus === 'processing'}
         />
-        <span className="command-hint">{voiceStatus === 'recording' || voiceStatus === 'processing' ? '음성 인식' : '자연어로 기록 · 별 아이콘을 눌러 음성 입력'}</span>
-        <Button type="submit" size="icon" aria-label="시간 기록 추가" disabled={voiceStatus === 'recording' || voiceStatus === 'processing'}>
+        <span className="command-hint">
+          {voiceStatus === 'recording' || voiceStatus === 'processing'
+            ? '음성 인식 · 다 말하면 별 아이콘을 다시 눌러주세요'
+            : '자연어로 기록 · 별 아이콘으로 음성 입력, 전송을 눌러야 반영돼요'}
+        </span>
+        <Button
+          type="submit"
+          size="icon"
+          aria-label="시간 기록 추가"
+          disabled={voiceStatus === 'recording' || voiceStatus === 'processing' || submitting || !prompt.trim()}
+        >
           <Send />
         </Button>
         <output className="command-message" aria-live="polite">
-          {message}
+          {submitting ? (
+            '기록을 추가하는 중...'
+          ) : message ? (
+            <span className="flex items-center gap-2">
+              {message}
+              {undoSnapshot && (
+                <button type="button" className="underline underline-offset-2" onClick={undoLastEntry}>
+                  실행 취소
+                </button>
+              )}
+            </span>
+          ) : null}
         </output>
       </form>
       <TimeBlockEditDialog
@@ -1392,29 +1478,12 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
         onOpenChange={setCreating}
         onCreate={createBlock}
       />
-      {(voiceStatus === 'recording' ||
-        voiceStatus === 'processing' ||
-        voiceError ||
-        voiceMessage) && (
+      {(voiceStatus === 'recording' || voiceStatus === 'processing' || voiceError) && (
         <div className="voice-fab-status" role="status" aria-live="polite">
           {voiceStatus === 'recording' && '오늘 한 일을 말해주세요. 다 되면 버튼을 다시 눌러 정지하세요.'}
           {voiceStatus === 'processing' && '인식 중...'}
           {voiceStatus !== 'recording' && voiceStatus !== 'processing' && voiceError && (
             <span className="text-danger">{voiceError}</span>
-          )}
-          {voiceStatus !== 'recording' && voiceStatus !== 'processing' && !voiceError && voiceMessage && (
-            <span className="flex items-center gap-2">
-              {voiceMessage}
-              {undoSnapshot && (
-                <button
-                  type="button"
-                  className="underline underline-offset-2"
-                  onClick={undoVoiceSchedule}
-                >
-                  실행 취소
-                </button>
-              )}
-            </span>
           )}
         </div>
       )}
@@ -1422,7 +1491,7 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
         type="button"
         className={`voice-fab ${voiceStatus === 'recording' ? 'recording' : ''}`}
         aria-label={voiceStatus === 'recording' ? '녹음 중지' : '음성으로 오늘 기록하기'}
-        disabled={voiceStatus === 'processing'}
+        disabled={voiceStatus === 'processing' || submitting}
         onClick={voiceStatus === 'recording' ? stopVoice : startVoice}
       >
         {voiceStatus === 'recording' ? <Square aria-hidden="true" /> : <Mic aria-hidden="true" />}
