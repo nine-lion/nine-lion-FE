@@ -28,6 +28,7 @@ import {
   Square,
   Target,
   Trash2,
+  X,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -248,15 +249,20 @@ function VoiceTranscriptDialog({
   );
 }
 
-function DraftConfirmDialog({
+// Renders inline inside the goal-editor card (not a modal) — an incomplete
+// or low-confidence voice extraction is reviewed right where the form
+// already lives, instead of interrupting with a popup.
+function VoiceDraftReviewPanel({
   initial,
-  onCancel,
+  onDismiss,
   onApply,
 }: {
   initial: { draft: GoalDraft; transcript: string; referenceDate: string };
-  onCancel: () => void;
+  onDismiss: () => void;
   onApply: (form: GoalFormValues, draft: GoalDraft) => void;
 }) {
+  // Remounted fresh per voice attempt via the `key` prop at the call site,
+  // so these only need an initial value — no effect-based resync needed.
   const [draft, setDraft] = useState<GoalDraft>(initial.draft);
   const [transcript, setTranscript] = useState(initial.transcript);
   const [reparsing, setReparsing] = useState(false);
@@ -282,13 +288,14 @@ function DraftConfirmDialog({
   const stillMissing = draft.missing_fields;
 
   return (
-    <>
-      <DialogHeader>
-        <DialogTitle>음성 초안 확인</DialogTitle>
-        <DialogDescription>
-          인식 결과를 검토하고 빠진 항목을 직접 입력해주세요.
-        </DialogDescription>
-      </DialogHeader>
+    <div className="voice-draft-panel">
+      <div className="voice-draft-panel-header">
+        <h3>음성 초안 확인</h3>
+        <button type="button" className="voice-draft-panel-close" aria-label="닫기" onClick={onDismiss}>
+          <X aria-hidden="true" />
+        </button>
+      </div>
+      <p className="text-caption text-muted-foreground">인식 결과를 검토하고 빠진 항목을 직접 입력해주세요.</p>
       <div className="flex flex-wrap items-center gap-2">
         <span className={draft.confidence < 0.7 ? 'text-caption text-warning-foreground' : 'text-caption'}>
           신뢰도 {(draft.confidence * 100).toFixed(0)}%
@@ -364,9 +371,9 @@ function DraftConfirmDialog({
           </div>
         </div>
       </details>
-      <DialogFooter>
-        <Button type="button" variant="outline" onClick={onCancel}>
-          취소
+      <div className="voice-draft-panel-footer">
+        <Button type="button" variant="outline" onClick={onDismiss}>
+          닫기
         </Button>
         <Button
           type="button"
@@ -385,8 +392,8 @@ function DraftConfirmDialog({
         >
           <Check aria-hidden="true" /> 폼에 채우기
         </Button>
-      </DialogFooter>
-    </>
+      </div>
+    </div>
   );
 }
 
@@ -579,6 +586,22 @@ function PlannerTab({ accountKey }: { accountKey: string }) {
             {voiceHint.message}
           </p>
         )}
+        {pendingDraft && (
+          <VoiceDraftReviewPanel
+            key={pendingDraft.transcript}
+            initial={pendingDraft}
+            onDismiss={() => setPendingDraft(null)}
+            onApply={(values) => {
+              setForm(values);
+              setSaved(false);
+              setVoiceHint({
+                kind: 'info',
+                message: '초안을 폼에 채웠어요. 빠진 항목을 입력한 뒤 저장하세요.',
+              });
+              setPendingDraft(null);
+            }}
+          />
+        )}
         <form onSubmit={submit}>
           <FieldGroup className="goal-fields">
             <Field>
@@ -701,30 +724,6 @@ function PlannerTab({ accountKey }: { accountKey: string }) {
           </article>
         ))}
       </aside>
-      <Dialog
-        open={pendingDraft !== null}
-        onOpenChange={(open) => {
-          if (!open) setPendingDraft(null);
-        }}
-      >
-        <DialogContent>
-          {pendingDraft && (
-            <DraftConfirmDialog
-              initial={pendingDraft}
-              onCancel={() => setPendingDraft(null)}
-              onApply={(values) => {
-                setForm(values);
-                setSaved(false);
-                setVoiceHint({
-                  kind: 'info',
-                  message: '초안을 폼에 채웠어요. 빠진 항목을 입력한 뒤 저장하세요.',
-                });
-                setPendingDraft(null);
-              }}
-            />
-          )}
-        </DialogContent>
-      </Dialog>
       <VoiceTranscriptDialog result={transcriptResult} onClose={() => setTranscriptResult(null)} />
     </div>
   );
