@@ -242,8 +242,29 @@
 .voice-fab-status .text-danger { color: #f87171; }
 
 @media (max-width: 900px) {
-  .topbar { grid-template-columns: 1fr auto; padding: 0 22px; }.main-nav { position: fixed; z-index: 45; left: 50%; bottom: 18px; transform: translateX(-50%); box-shadow: 0 12px 38px rgba(45,57,45,.2); background: rgba(243,242,233,.9); backdrop-filter: blur(16px); }.quick-add { display: none; }.planner-grid { grid-template-columns: 1fr; }.content-wrap { width: min(100% - 28px,720px); padding-top: 24px; padding-bottom: 100px; }.calendar-toolbar { grid-template-columns: 1fr auto; }.calendar-actions { align-items: flex-end; flex-direction: column; gap: 7px; }.calendar-legend { grid-column: 1 / -1; justify-self: start; }.calendar-grid { overflow-x: auto; grid-template-columns: repeat(7,minmax(118px,1fr)); }.calendar-grid--quarter { grid-template-columns: repeat(7,minmax(40px,1fr)); }.calendar-grid--year { grid-template-columns: repeat(7,minmax(26px,1fr)); }.multi-calendar--quarter { grid-template-columns: 1fr; }.multi-calendar--year { grid-template-columns: repeat(2,minmax(0,1fr)); }.calendar-shell { overflow-x: auto; padding-bottom: 120px; }.command-bar { bottom: 82px; }.voice-fab { bottom: 96px; }.voice-fab-status { bottom: 164px; }
+  .topbar { grid-template-columns: 1fr auto; padding: 0 22px; }.main-nav { position: fixed; z-index: 45; left: 50%; bottom: 18px; transform: translateX(-50%); box-shadow: 0 12px 38px rgba(45,57,45,.2); background: rgba(243,242,233,.9); backdrop-filter: blur(16px); }.quick-add { display: none; }.planner-grid { grid-template-columns: 1fr; }.content-wrap { width: min(100% - 28px,720px); padding-top: 24px; padding-bottom: 100px; }.calendar-toolbar { grid-template-columns: 1fr auto; }.calendar-actions { align-items: flex-end; flex-direction: column; gap: 7px; }.calendar-legend { grid-column: 1 / -1; justify-self: start; }.calendar-grid { overflow-x: visible; grid-template-columns: repeat(7,minmax(0,1fr)); }.calendar-grid--quarter { grid-template-columns: repeat(7,minmax(0,1fr)); }.calendar-grid--year { grid-template-columns: repeat(7,minmax(0,1fr)); }.multi-calendar--quarter { grid-template-columns: 1fr; }.multi-calendar--year { grid-template-columns: repeat(2,minmax(0,1fr)); }.calendar-shell { overflow-x: visible; padding-bottom: 120px; }.weekday { height: 34px; font-size: 10px; }.day-cell { height: clamp(58px,9vw,88px); padding: 8px 7px 6px; }.day-number { height: 18px; font-size: 11px; transform: translateY(-4px); }.marker-track { height: 18px; margin: 2px -7px 0; }.time-block { top: 3px; height: 13px; }.hours-total { font-size: 8.5px; }.command-bar { bottom: 82px; }.voice-fab { bottom: 96px; }.voice-fab-status { bottom: 164px; }
 }
 @media (max-width: 600px) {
-  .topbar { height: 66px; }.brand { font-size: 17px; }.brand-mark { width: 30px; height: 30px; }.main-nav button { min-width: 128px; }.goal-editor { padding: 25px 20px; border-radius: 20px; }.goal-editor h1 { font-size: 34px; }.goal-fields { grid-template-columns: 1fr; }.goal-fields .wide-field { grid-column: auto; }.form-footer { align-items: stretch; flex-direction: column-reverse; }.save-goal { width: 100%; }.calendar-toolbar { align-items: center; }.calendar-toolbar h1 { font-size: 21px; }.view-switch button { min-width: 42px; padding-inline: 7px; }.multi-calendar--year { grid-template-columns: 1fr; }.command-hint { display: none; }.command-bar { grid-template-columns: auto 1fr auto; }
+  .topbar { height: 66px; }.brand { font-size: 17px; }
+  .brand-mark { width: 30px; height: 30px; }
+  .main-nav button { min-width: 128px; }
+  .goal-editor { padding: 25px 20px; border-radius: 20px; }
+  .goal-editor h1 { font-size: 34px; }
+  .goal-fields { grid-template-columns: 1fr; }
+  .goal-fields .wide-field { grid-column: auto; }
+  .form-footer { align-items: stretch; flex-direction: column-reverse; }
+  .save-goal { width: 100%; }.calendar-toolbar { align-items: center; }
+  .calendar-toolbar h1 { font-size: 21px; }
+  .view-switch button { min-width: 42px; padding-inline: 7px; }
+  .multi-calendar--year { grid-template-columns: 1fr; }
+  .command-hint { display: none; }
+  .command-bar { grid-template-columns: auto 1fr auto; }
+  .calendar-shell { overflow-x: visible; }
+  .calendar-grid { overflow-x: visible; grid-template-columns: repeat(7,minmax(0,1fr)); }
+  .weekday { height: 26px; font-size: 9px; }
+  .day-cell { height: clamp(46px,13vw,64px); padding: 5px 4px 4px; }
+  .day-number { height: 14px; font-size: 10px; transform: translateY(-3px); }
+  .marker-track { height: 14px; margin: 1px -4px 0; }
+  .time-block { top: 2px; height: 10px; border-radius: 2px; }
+  .hours-total { font-size: 7.5px; right: 4px; bottom: 3px; }
 }

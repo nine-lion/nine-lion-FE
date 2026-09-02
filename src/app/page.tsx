@@ -34,6 +34,23 @@ const timeValueToHour = (value: string) => {
 const hasOverlap = (blocks: TimeBlock[], date: string, start: number, end: number, excludeId?: number) =>
   blocks.some((block) => block.id !== excludeId && block.date === date && start < block.end && end > block.start);
 
+// Trims or splits any existing block that overlaps a new entry's date/time range, so the
+// new entry can take over that slot instead of being rejected outright.
+function replaceOverlappingEntries(existingBlocks: TimeBlock[], entries: Omit<TimeBlock, 'id'>[], idSeed: number): TimeBlock[] {
+  let result = existingBlocks;
+  let nextId = idSeed + 10000;
+  entries.forEach((entry) => {
+    result = result.flatMap((block) => {
+      if (block.date !== entry.date || entry.end <= block.start || entry.start >= block.end) return [block];
+      const segments: TimeBlock[] = [];
+      if (block.start < entry.start) segments.push({ ...block, end: entry.start });
+      if (block.end > entry.end) segments.push({ ...block, id: nextId++, start: entry.end });
+      return segments;
+    });
+  });
+  return result;
+}
+
 const APP_TODAY_ISO = '2026-09-01';
 
 type VoiceStatus = 'idle' | 'recording' | 'processing' | 'error';
@@ -97,7 +114,8 @@ const useVoiceScheduleCapture = (onResult: (result: ScheduleVoiceResult) => void
   useVoiceCapture<ScheduleVoiceResult>('/api/voice/schedule', onResult);
 
 function toHourWithMeridiem(match: RegExpMatchArray, meridiemOverride?: string): number {
-  const [, before, hourStr, minuteStr, after] = match;
+  const [, before, hourStr, minuteViaBun, minuteViaColon, after] = match;
+  const minuteStr = minuteViaBun || minuteViaColon;
   const meridiem = (meridiemOverride || before || after || '').toLowerCase();
   let hour = Number(hourStr);
   if (meridiem === '오후' || meridiem === 'pm') {
@@ -129,11 +147,11 @@ function parseNaturalEntry(text: string, fallback: Date): Omit<TimeBlock, 'id'>[
   if (/어제|yesterday/i.test(remaining)) entryDate.setDate(entryDate.getDate() - 1);
   if (/내일|tomorrow/i.test(remaining)) entryDate.setDate(entryDate.getDate() + 1);
 
-  const timeMatches = [...remaining.matchAll(/(오전|오후|am|pm)?\s*(\d{1,2})(?::(\d{2}))?\s*(오전|오후|am|pm)?/gi)];
+  const timeMatches = [...remaining.matchAll(/(오전|오후|am|pm)?\s*(\d{1,2})\s*시?\s*(?:(\d{1,2})\s*분|:(\d{2}))?\s*(오전|오후|am|pm)?/gi)];
   if (timeMatches.length < 2) return null;
   const start = toHourWithMeridiem(timeMatches[0]);
-  const startMeridiem = (timeMatches[0][1] || timeMatches[0][4] || '').toLowerCase();
-  const endHasMeridiem = Boolean(timeMatches[1][1] || timeMatches[1][4]);
+  const startMeridiem = (timeMatches[0][1] || timeMatches[0][5] || '').toLowerCase();
+  const endHasMeridiem = Boolean(timeMatches[1][1] || timeMatches[1][5]);
   let end = toHourWithMeridiem(timeMatches[1]);
   // "오후 8시에서 11시까지" — the second time omits AM/PM; if read literally it would
   // end before it starts, so assume the speaker meant it to carry the same meridiem.
@@ -525,20 +543,21 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
   const addNaturalEntry = (event: FormEvent) => {
     event.preventDefault(); const parsed = parseNaturalEntry(prompt, today);
     if (!parsed) { setMessage('시간 두 개를 포함해 적어주세요. 예: 오늘 19:00~22:00 공부'); return; }
-    if (parsed.some((entry) => hasOverlap(blocks, entry.date, entry.start, entry.end))) {
-      setMessage('이미 등록된 시간과 겹쳐서 추가하지 못했어요.');
-      return;
-    }
-    setUndoSnapshot(null);
+    const hadOverlap = parsed.some((entry) => hasOverlap(blocks, entry.date, entry.start, entry.end));
+    setUndoSnapshot(blocks);
     const baseId = Date.now();
-    const newEntries: TimeBlock[] = parsed.map((entry, index) => ({ ...entry, id: baseId + index }));
-    setBlocks((previous) => [...previous, ...newEntries]);
+    setBlocks((previous) => [...replaceOverlappingEntries(previous, parsed, baseId), ...parsed.map((entry, index) => ({ ...entry, id: baseId + index }))]);
     setPrompt('');
-    setMessage(
-      parsed.length > 1
-        ? `${parsed[0].label} ${formatHour(parsed[0].start)}–자정을 넘어 ${formatHour(parsed[1].end)}까지 기록을 추가했어요.`
-        : `${parsed[0].label} ${formatHour(parsed[0].start)}–${formatHour(parsed[0].end)} 기록을 추가했어요.`,
-    );
+    const addedMessage = parsed.length > 1
+      ? `${parsed[0].label} ${formatHour(parsed[0].start)}–자정을 넘어 ${formatHour(parsed[1].end)}까지 기록을 추가했어요.`
+      : `${parsed[0].label} ${formatHour(parsed[0].start)}–${formatHour(parsed[0].end)} 기록을 추가했어요.`;
+    setMessage(hadOverlap ? `겹치는 기존 기록을 정리하고 ${addedMessage}` : addedMessage);
+  };
+  const undoNaturalEntry = () => {
+    if (!undoSnapshot) return;
+    setBlocks(undoSnapshot);
+    setUndoSnapshot(null);
+    setMessage('방금 추가한 기록을 취소했어요.');
   };
   const editingBlock = blocks.find((block) => block.id === editingId) ?? null;
   const updateBlock = (id: number, patch: Omit<TimeBlock, 'id' | 'date'>) => {
@@ -612,7 +631,7 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
           {visibleMonths.map((visibleMonth) => <section className="mini-month" key={`${visibleMonth.getFullYear()}-${visibleMonth.getMonth()}`}><h2>{MONTHS[visibleMonth.getMonth()]}</h2><TimeMonthGrid month={visibleMonth} blocks={blocks} today={today} variant={view} onBlockClick={setEditingId} /></section>)}
         </div>
       ) : <YearMatrix year={month.getFullYear()} blocks={blocks} today={today} />}
-      <form className="command-bar" onSubmit={addNaturalEntry}><div className="command-icon"><Sparkles aria-hidden="true" /></div><label htmlFor="natural-entry" className="sr-only">자연어로 시간 기록 추가</label><input id="natural-entry" value={prompt} onChange={(event) => { setPrompt(event.target.value); setMessage(''); }} placeholder="예: 오늘 03:00부터 08:00까지 잤어" /><span className="command-hint">자연어로 기록</span><Button type="submit" size="icon" aria-label="시간 기록 추가"><Send /></Button><output className="command-message" aria-live="polite">{message}</output></form>
+      <form className="command-bar" onSubmit={addNaturalEntry}><div className="command-icon"><Sparkles aria-hidden="true" /></div><label htmlFor="natural-entry" className="sr-only">자연어로 시간 기록 추가</label><input id="natural-entry" value={prompt} onChange={(event) => { setPrompt(event.target.value); setMessage(''); }} placeholder="예: 오늘 03:00부터 08:00까지 잤어" /><span className="command-hint">자연어로 기록</span><Button type="submit" size="icon" aria-label="시간 기록 추가"><Send /></Button><output className="command-message" aria-live="polite">{message}{undoSnapshot && message && <button type="button" className="underline underline-offset-2 ml-2" onClick={undoNaturalEntry}>실행 취소</button>}</output></form>
       <TimeBlockEditDialog block={editingBlock} blocks={blocks} onOpenChange={(open) => !open && setEditingId(null)} onSave={updateBlock} onDelete={deleteBlock} />
       <TimeBlockCreateDialog open={creating} sessionId={createSessionId} defaultDate={isoDate(today)} blocks={blocks} onOpenChange={setCreating} onCreate={createBlock} />
       {(voiceStatus === 'recording' || voiceStatus === 'processing' || voiceError || voiceMessage) && (
