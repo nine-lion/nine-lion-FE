@@ -14,13 +14,22 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: {
-    default: "Together",
-    template: "%s · Together",
-  },
+  title: 'Goalsetter — 시험 목표와 시간을 한눈에',
   description:
-    "공부 자료(PDF)를 업로드하면 AI가 문제를 생성하고, 학습 결과를 분석해 개인 맞춤형 학습을 제공해요.",
+    '자격시험 목표를 세우고 하루 24시간을 타임 마커로 기록하는 공부 계획 앱',
+  openGraph: {
+    title: 'Goalsetter',
+    description: '시험 목표와 시간을 한눈에',
+    images: [{ url: '/og.png', width: 1200, height: 630 }],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Goalsetter',
+    description: '시험 목표와 시간을 한눈에',
+    images: ['/og.png'],
+  },
 };
+
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
