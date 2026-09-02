@@ -66,13 +66,39 @@ async function parseBody(response: Response): Promise<unknown> {
 }
 
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  // FormData bodies need the browser-set multipart boundary; only force
+  // JSON Content-Type when the caller is not uploading multipart.
+  const isFormData = typeof FormData !== 'undefined' && init?.body instanceof FormData;
+  const headers: HeadersInit = isFormData
+    ? { ...init?.headers }
+    : {
+        'Content-Type': 'application/json',
+        ...init?.headers,
+      };
+
   const response = await fetch(getApiUrl(path), {
     ...init,
     credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...init?.headers,
-    },
+    headers,
+  });
+
+  const body = await parseBody(response);
+
+  if (!response.ok) {
+    throw new ApiError(extractErrorMessage(body), response.status, body);
+  }
+
+  return body as T;
+}
+
+/**
+ * Sends a multipart/form-data request without forcing a JSON Content-Type.
+ * Used for audio uploads to the goals/voice endpoints.
+ */
+export async function apiFetchForm<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(getApiUrl(path), {
+    ...init,
+    credentials: 'include',
   });
 
   const body = await parseBody(response);

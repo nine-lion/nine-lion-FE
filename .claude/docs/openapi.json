@@ -1,0 +1,978 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Nine Lion Goalsetter API",
+    "version": "0.1.0",
+    "summary": "시험 목표를 말 한 번으로 등록하는 한국어 음성 입력 백엔드",
+    "description": "## 개요\n\nNine Lion Goalsetter API는 **자격증·시험 준비생**이 학습 목표를 손쉽게 등록할 수 있도록 설계된 FastAPI 백엔드입니다. 핵심 기능은 다음 한 줄로 요약됩니다.\n\n> **녹음 한 번 → 한국어 전사 → 4개 항목(시험명/시험일/출제범위/목표) 자동 추출 → 사용자 확인·저장**\n\n전사(STT)와 구조화 추출에는 [OpenAI ChatGPT](https://platform.openai.com/) (Speech-to-Text + `gpt-4o-mini`)를 사용하며, OpenAI 장애 시 한국어 정규식·날짜 파서 기반 휴리스틱 폴백이 동작합니다.\n\n---\n\n## 사용자 흐름 (End-to-End)\n\n1. **FE(Next.js)** 에서 `MediaRecorder`로 1회 녹음 → `audio/webm` Blob 업로드\n2. **`POST /goals/voice`** 호출 → STT → 4개 항목 초안(`GoalDraft`) 반환\n3. **FE** 에서 초안 시트로 사용자에게 확인·수정 요청\n4. **`POST /goals`** (또는 `PATCH /goals/{id}`) 호출 → DB 저장 (`GoalRead`)\n5. **`GET /goals`** 로 D-day, 출제범위, 목표를 목록에 표시\n\n---\n\n## 인증 모델\n\n- **개발 모드** (`REQUIRE_AUTH=false`, `JWT_SECRET` 미설정): 모든 호출은 게스트(`guest`) 스코프로 동작합니다. 토큰이 없거나 변조된 토큰도 헤더/쿠키로 보낼 수 있으면 무시됩니다.\n- **운영 모드** (`REQUIRE_AUTH=true`, `JWT_SECRET` 설정): JWT(HS256) 토큰의 `sub`/`user_id`/`email`/`id` 클레임에서 사용자 ID를 추출해 데이터 스코프를 강제합니다. 토큰이 없거나 변조되면 `401 unauthorized`.\n\n토큰은 다음 두 가지 방법으로 전달됩니다.\n\n| 방법 | 형식 | 예시 |\n|------|------|------|\n| `Authorization` 헤더 | `Bearer <jwt>` | `Authorization: Bearer eyJhbGciOi...` |\n| 쿠키 | `access_token` (이름은 설정 가능) | `Cookie: access_token=eyJhbGciOi...` |\n\n---\n\n## 오디오 제약\n\n- **허용 컨테이너**: `.flac .m4a .mp3 .mp4 .mpeg .mpga .oga .ogg .wav .webm`\n- **허용 MIME**: `audio/webm`, `audio/ogg`, `audio/mpeg`, `audio/mp4`, `audio/x-m4a`, `audio/m4a`, `audio/wav`, `audio/x-wav`, `audio/wave`, `audio/flac`, `audio/x-flac`, `video/webm`\n- **최대 크기**: `25 MB` (OpenAI 전사 API의 업로드 상한과 동일, `MAX_AUDIO_BYTES` 환경변수로 변경 가능)\n\n---\n\n## 한국어 날짜 파서\n\n`app/services/korean_dates.py`는 다음 표현을 모두 `YYYY-MM-DD`로 변환합니다.\n\n| 발화 예시 | 해석 (2026-09-02 기준) |\n|-----------|----------------------|\n| `9월 26일` | 2026-09-26 (이미 지났으면 2027-09-26) |\n| `다음 달 15일` | 2026-10-15 |\n| `다음 주 토요일` | 2026-09-12 (월요일 시작 주 기준) |\n| `이번 주 금요일` | 2026-09-04 |\n| `D-30` / `D - 90` | 기준일 + N일 |\n| `3주 뒤` / `2주 후` | 기준일 + N주 |\n| `한 달 뒤` / `2개월 후` | 기준일 + N개월 (말일 보정) |\n| `11월 말` | 2026-11-30 |\n| `12월 초` | 2026-12-01 |\n| `오늘` / `내일` / `모레` | 기준일 + 0/1/2 |\n| `2026-09-26` (ISO) | 그대로 |\n\n---\n\n## 에러 모델\n\n모든 에러는 다음 형태로 반환됩니다.\n\n```json\n{ \"detail\": \"사람이 읽을 메시지\", \"code\": \"machine_readable_code\", \"meta\": { \"...\": \"...\" } }\n```\n\n| HTTP | `code` | 의미 | 해결 |\n|------|--------|------|------|\n| `400` | `invalid_audio` | 빈 파일 / 미지원 포맷 / 25MB 초과 | FE에서 재녹음 안내 |\n| `401` | `unauthorized` | 토큰 누락·위조 (운영 모드) | 로그인 페이지로 이동 |\n| `404` | `not_found` | 다른 사용자 목표이거나 없는 ID | 목록에서 제거 |\n| `422` | `invalid_request` | Pydantic 검증 실패 (필수 누락, 길이 초과 등) | 입력값 보정 |\n| `500` | `jwt_secret_missing` | 운영인데 시크릿 미설정 | 환경변수 점검 |\n| `502` | `transcription_failed` / `extraction_failed` | OpenAI 호출 실패 | 잠시 후 재시도, 자동 폴백 |\n| `503` | `provider_not_configured` | `OPENAI_API_KEY` 미설정 | 관리자 문의 |\n\n---\n\n## 환경 변수\n\n| 이름 | 기본값 | 설명 |\n|------|--------|------|\n| `OPENAI_API_KEY` | _(없음)_ | ChatGPT STT·추출 호출에 사용. 미설정 시 503. |\n| `OPENAI_BASE_URL` | _(OpenAI 기본)_ | Azure OpenAI 등으로 교체 시. |\n| `OPENAI_TIMEOUT` | `60.0` (초) | OpenAI 클라이언트 타임아웃. |\n| `STT_MODEL` | `gpt-4o-transcribe` | STT 모델. `gpt-4o-mini-transcribe`, `whisper-1` 도 가능. |\n| `STT_LANGUAGE` | `ko` | 전사 시 고정 언어 힌트. |\n| `STT_PROVIDER` | `openai` | `fake` 로 바꾸면 업로드를 UTF-8 텍스트로 해석. |\n| `LLM_MODEL` | `gpt-4o-mini` | 4개 항목 추출 모델. |\n| `EXTRACTOR_PROVIDER` | `openai` | `heuristic` 으로 바꾸면 LLM 없이 정규식만 사용. |\n| `MAX_AUDIO_BYTES` | `26214400` (25MB) | 업로드 최대 바이트. |\n| `MAX_TRANSCRIPT_CHARS` | `4000` | 추출기에 넘기는 전사 텍스트 길이 상한. |\n| `DATABASE_URL` | `sqlite+aiosqlite:///./nine_lion.db` | SQLAlchemy 비동기 URL. |\n| `JWT_SECRET` | _(없음)_ | 운영 모드에서 토큰 서명 검증 키. |\n| `JWT_ALGORITHM` | `HS256` | JWT 알고리즘. |\n| `ACCESS_TOKEN_COOKIE` | `access_token` | 인증 쿠키 이름. |\n| `REQUIRE_AUTH` | `false` | `true` 면 미인증 호출 거부. |\n| `GUEST_USER_ID` | `guest` | 게스트 스코프 사용자 ID. |\n| `CORS_ORIGINS` | `http://localhost:3000` | 쉼표 구분. FE 도메인. |\n| `TIMEZONE` | `Asia/Seoul` | `today_local()` 기준. |\n\n",
+    "contact": {
+      "name": "Nine Lion Team",
+      "url": "https://github.com/",
+      "email": "dev@nine-lion.example"
+    },
+    "license": {
+      "name": "Proprietary"
+    },
+    "termsOfService": "https://nine-lion.example/terms"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8000",
+      "description": "로컬 개발 (uv run uvicorn app.main:app --reload)"
+    },
+    {
+      "url": "https://api.dev.nine-lion.example",
+      "description": "개발 서버 (스테이징)"
+    },
+    {
+      "url": "https://api.nine-lion.example",
+      "description": "운영 서버"
+    }
+  ],
+  "tags": [
+    {
+      "name": "health",
+      "description": "헬스 체크 / 메타 정보"
+    },
+    {
+      "name": "goals:voice",
+      "description": "음성·텍스트 입력으로 목표 초안을 만드는 엔드포인트"
+    },
+    {
+      "name": "goals",
+      "description": "목표 CRUD (사용자 스코프)"
+    }
+  ],
+  "x-tagGroups": [
+    {
+      "name": "운영",
+      "tags": ["health", "goals:voice", "goals"]
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["health"],
+        "summary": "헬스 체크",
+        "description": "서버·DB·OpenAI 설정을 한 번에 점검합니다. 컨테이너 readiness/liveness probe에서 사용합니다.\n\n- `status` 가 `ok` 이면 HTTP 200\n- `openai_configured=false` 면 STT/추출 호출 시 503이 발생할 수 있음\n",
+        "operationId": "health_check",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "정상 응답",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                },
+                "examples": {
+                  "ok": {
+                    "summary": "OpenAI 키 설정됨",
+                    "value": {
+                      "status": "ok",
+                      "version": "0.1.0",
+                      "now": "2026-09-02T09:00:00+09:00",
+                      "stt": {"provider": "openai", "model": "gpt-4o-transcribe"},
+                      "extractor": {"provider": "openai", "model": "gpt-4o-mini"},
+                      "openai_configured": true
+                    }
+                  },
+                  "no-key": {
+                    "summary": "OpenAI 키 미설정 (경고)",
+                    "value": {
+                      "status": "ok",
+                      "version": "0.1.0",
+                      "now": "2026-09-02T09:00:00+09:00",
+                      "stt": {"provider": "openai", "model": "gpt-4o-transcribe"},
+                      "extractor": {"provider": "openai", "model": "gpt-4o-mini"},
+                      "openai_configured": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/goals/voice/transcribe": {
+      "post": {
+        "tags": ["goals:voice"],
+        "summary": "음성 → 텍스트 전사",
+        "description": "녹음 파일을 ChatGPT Speech-to-Text로 전사만 수행합니다. 4개 항목 추출·저장은 하지 않습니다.\n\n### 언제 쓰나\n- FE에서 실시간 텍스트 미리보기를 보여줄 때 (입력 패널)\n- 음성 인식률 검증 (`scripts/verify_stt.py`)\n\n### 전사 후 처리\n- `model=whisper-1` 일 때만 `duration` (초) 제공\n- `text` 가 비면 `502 transcription_failed`\n\n### 인증\n- 게스트 OK (운영 모드에서도 토큰 없으면 `unauthorized`)\n",
+        "operationId": "transcribe_audio",
+        "security": [{"bearerAuth": []}, {"cookieAuth": []}, {}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/VoiceTranscribeForm"
+              },
+              "encoding": {
+                "audio": {"contentType": "audio/webm, audio/ogg, audio/mp4, audio/mpeg, audio/wav, audio/flac"},
+                "prompt": {"contentType": "text/plain; charset=utf-8"}
+              },
+              "examples": {
+                "webm": {
+                  "summary": "Chrome MediaRecorder 기본 포맷",
+                  "value": "<<binary audio/webm blob>>"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "전사 성공",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptionResponse"
+                },
+                "examples": {
+                  "ko": {
+                    "value": {
+                      "text": "시험명은 일반기계기사 필기고 시험일은 9월 26일이야. 범위는 재료역학이고 목표는 기출 7개년 2회독이야.",
+                      "language": "ko",
+                      "duration": 9.42,
+                      "model": "gpt-4o-transcribe"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/AudioValidationError"},
+          "422": {"$ref": "#/components/responses/ValidationError"},
+          "502": {"$ref": "#/components/responses/TranscriptionError"},
+          "503": {"$ref": "#/components/responses/ProviderNotConfiguredError"}
+        }
+      }
+    },
+    "/goals/voice": {
+      "post": {
+        "tags": ["goals:voice"],
+        "summary": "음성 → 목표 초안(+저장)",
+        "description": "녹음 → 전사 → 한국어 날짜 해석 → 4개 항목 추출까지 한 번에 수행합니다.\n\n### 동작 흐름\n1. `read_audio_upload`: 25MB/포맷 검증\n2. `stt.transcribe`: ChatGPT STT (실패 시 휴리스틱으로 폴백 X — 이 엔드포인트는 폴백 없이 502)\n3. `extractor.extract`: OpenAI `gpt-4o-mini` (json_schema strict) → 휴리스틱 폴백\n4. `save=true` 이면 `draft.is_complete=true` 일 때만 `POST /goals` 와 동일하게 즉시 저장\n\n### 인증\n- **운영 모드**: 인증 필수 (`401 unauthorized`)\n- **개발 모드**: 게스트(`guest`) 스코프\n\n### 폴백 메커니즘\n- LLM 호출 실패 → `heuristic_fallback` 으로 자동 전환, `provider` 필드에 명시, `notes` 에 \"AI 추출에 실패해 규칙 기반으로 채웠습니다\" 노출\n",
+        "operationId": "create_goal_from_voice",
+        "security": [{"bearerAuth": []}, {"cookieAuth": []}, {}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/VoiceGoalForm"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "초안 반환 (저장 포함 가능)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VoiceGoalResponse"
+                },
+                "examples": {
+                  "complete": {
+                    "summary": "4개 항목 모두 인식 + 저장 성공",
+                    "value": {
+                      "transcript": "시험명은 일반기계기사 필기고 시험일은 9월 26일이야. 범위는 재료역학이고 목표는 기출 7개년 2회독이야.",
+                      "draft": {
+                        "exam": "일반기계기사 필기",
+                        "date": "2026-09-26",
+                        "scope": "재료역학",
+                        "target": "기출 7개년 2회독",
+                        "confidence": 0.92,
+                        "provider": "openai:gpt-4o-mini",
+                        "notes": null,
+                        "missing_fields": [],
+                        "missing_labels": [],
+                        "is_complete": true,
+                        "needs_confirmation": false
+                      },
+                      "reference_date": "2026-09-02",
+                      "stt_model": "gpt-4o-transcribe",
+                      "duration": 9.42,
+                      "saved": true,
+                      "goal": {
+                        "id": "f5c0d3a8-3a92-4b1d-9a8e-2e0a1b6c8d7e",
+                        "exam": "일반기계기사 필기",
+                        "date": "2026-09-26",
+                        "scope": "재료역학",
+                        "target": "기출 7개년 2회독",
+                        "source": "voice",
+                        "transcript": "시험명은 일반기계기사 필기고 시험일은 9월 26일이야. 범위는 재료역학이고 목표는 기출 7개년 2회독이야.",
+                        "created_at": "2026-09-02T09:01:12.345678",
+                        "updated_at": "2026-09-02T09:01:12.345678",
+                        "d_day": 24
+                      }
+                    }
+                  },
+                  "incomplete": {
+                    "summary": "일부 항목 누락 (저장 안 됨)",
+                    "value": {
+                      "transcript": "시험은 정보처리기사야",
+                      "draft": {
+                        "exam": "정보처리기사",
+                        "date": null,
+                        "scope": null,
+                        "target": null,
+                        "confidence": 0.55,
+                        "provider": "openai:gpt-4o-mini",
+                        "notes": null,
+                        "missing_fields": ["date", "scope", "target"],
+                        "missing_labels": ["시험일", "출제범위", "목표"],
+                        "is_complete": false,
+                        "needs_confirmation": true
+                      },
+                      "reference_date": "2026-09-02",
+                      "stt_model": "gpt-4o-transcribe",
+                      "duration": 2.10,
+                      "saved": false,
+                      "goal": null
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/AudioValidationError"},
+          "401": {"$ref": "#/components/responses/UnauthorizedError"},
+          "422": {"$ref": "#/components/responses/ValidationError"},
+          "502": {"$ref": "#/components/responses/ProviderErrors"},
+          "503": {"$ref": "#/components/responses/ProviderNotConfiguredError"}
+        }
+      }
+    },
+    "/goals/parse": {
+      "post": {
+        "tags": ["goals:voice"],
+        "summary": "텍스트 → 목표 초안",
+        "description": "전사 텍스트 또는 사용자가 직접 수정한 텍스트에서 4개 항목을 다시 추출합니다.\n\n### 언제 쓰나\n- 사용자가 초안 시트에서 텍스트를 고치고 **다시 추출** 버튼을 눌렀을 때\n- 음성 API 호출 없이 텍스트만으로 미리보기\n\n### 인증\n- 게스트 OK (운영 모드에서는 토큰 필요)\n",
+        "operationId": "parse_goal_text",
+        "security": [{"bearerAuth": []}, {"cookieAuth": []}, {}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ParseGoalRequest"
+              },
+              "examples": {
+                "korean": {
+                  "summary": "한국어 한 줄",
+                  "value": {
+                    "text": "시험명은 일반기계기사 필기고 시험일은 다음 달 15일이야. 범위는 재료역학이고 목표는 기출 7개년 2회독이야.",
+                    "reference_date": "2026-09-02"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "추출된 초안",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoalDraftResponse"
+                },
+                "examples": {
+                  "relative": {
+                    "summary": "상대 날짜 해석",
+                    "value": {
+                      "transcript": "시험명은 일반기계기사 필기고 시험일은 다음 달 15일이야. 범위는 재료역학이고 목표는 기출 7개년 2회독이야.",
+                      "draft": {
+                        "exam": "일반기계기사 필기",
+                        "date": "2026-10-15",
+                        "scope": "재료역학",
+                        "target": "기출 7개년 2회독",
+                        "confidence": 0.88,
+                        "provider": "openai:gpt-4o-mini",
+                        "notes": null,
+                        "missing_fields": [],
+                        "missing_labels": [],
+                        "is_complete": true,
+                        "needs_confirmation": false
+                      },
+                      "reference_date": "2026-09-02"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {"$ref": "#/components/responses/ValidationError"},
+          "502": {"$ref": "#/components/responses/ExtractionError"},
+          "503": {"$ref": "#/components/responses/ProviderNotConfiguredError"}
+        }
+      }
+    },
+    "/goals": {
+      "post": {
+        "tags": ["goals"],
+        "summary": "목표 생성",
+        "description": "초안 확정 후 목표를 저장합니다. 음성 초안(`source=voice`)과 수기 입력(`source=manual`) 모두 같은 엔드포인트를 씁니다.\n\n### 검증 규칙\n- `exam` 1~200자\n- `scope`, `target` 1~2000자\n- `date` `YYYY-MM-DD` 형식\n- `transcript` 최대 8000자\n\n### 인증\n- 운영 모드: 필수\n",
+        "operationId": "create_goal",
+        "security": [{"bearerAuth": []}, {"cookieAuth": []}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "#/components/schemas/GoalCreate"},
+              "examples": {
+                "voice": {
+                  "summary": "음성 확정 저장",
+                  "value": {
+                    "exam": "일반기계기사 필기",
+                    "date": "2026-09-26",
+                    "scope": "재료역학",
+                    "target": "기출 7개년 2회독",
+                    "source": "voice",
+                    "transcript": "시험명은 일반기계기사 필기고 시험일은 9월 26일이야."
+                  }
+                },
+                "manual": {
+                  "summary": "수기 입력",
+                  "value": {
+                    "exam": "정보처리기사 실기",
+                    "date": "2026-11-30",
+                    "scope": "SQL · 데이터 모델링 · 프로시저",
+                    "target": "기출 10개년 + 모의고사 3회",
+                    "source": "manual"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "생성 성공",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/GoalRead"},
+                "examples": {
+                  "created": {
+                    "value": {
+                      "id": "f5c0d3a8-3a92-4b1d-9a8e-2e0a1b6c8d7e",
+                      "exam": "일반기계기사 필기",
+                      "date": "2026-09-26",
+                      "scope": "재료역학",
+                      "target": "기출 7개년 2회독",
+                      "source": "voice",
+                      "transcript": "...",
+                      "created_at": "2026-09-02T09:01:12.345678",
+                      "updated_at": "2026-09-02T09:01:12.345678",
+                      "d_day": 24
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/UnauthorizedError"},
+          "422": {"$ref": "#/components/responses/ValidationError"}
+        }
+      },
+      "get": {
+        "tags": ["goals"],
+        "summary": "목표 목록",
+        "description": "현재 사용자의 목표를 **시험일 오름차순**, 동률이면 **생성일 내림차순**으로 반환합니다.\n\n### 페이지네이션\n- `limit`: 1~200, 기본 50\n- `offset`: 0 이상, 기본 0\n- 단순 오프셋 페이지네이션. 무한 스크롤 FE에서 사용.\n",
+        "operationId": "list_goals",
+        "security": [{"bearerAuth": []}, {"cookieAuth": []}],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+            "description": "페이지 크기"
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "integer", "minimum": 0, "default": 0},
+            "description": "건너뛸 개수"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "목록",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {"$ref": "#/components/schemas/GoalRead"}
+                },
+                "examples": {
+                  "two-items": {
+                    "value": [
+                      {
+                        "id": "f5c0d3a8-3a92-4b1d-9a8e-2e0a1b6c8d7e",
+                        "exam": "일반기계기사 필기",
+                        "date": "2026-09-26",
+                        "scope": "재료역학",
+                        "target": "기출 7개년 2회독",
+                        "source": "voice",
+                        "transcript": "...",
+                        "created_at": "2026-09-02T09:01:12.345678",
+                        "updated_at": "2026-09-02T09:01:12.345678",
+                        "d_day": 24
+                      },
+                      {
+                        "id": "0d0bb1f2-7e2b-4d6f-9f7b-1a2b3c4d5e6f",
+                        "exam": "정보처리기사 실기",
+                        "date": "2026-11-30",
+                        "scope": "SQL · 데이터 모델링 · 프로시저",
+                        "target": "기출 10개년 + 모의고사 3회",
+                        "source": "manual",
+                        "transcript": null,
+                        "created_at": "2026-09-01T18:22:01.000000",
+                        "updated_at": "2026-09-01T18:22:01.000000",
+                        "d_day": 89
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/UnauthorizedError"},
+          "422": {"$ref": "#/components/responses/ValidationError"}
+        }
+      }
+    },
+    "/goals/{goal_id}": {
+      "get": {
+        "tags": ["goals"],
+        "summary": "목표 단건 조회",
+        "description": "ID로 단건 조회합니다. **다른 사용자의 목표면 404**로 응답해 정보 누설을 방지합니다.",
+        "operationId": "get_goal",
+        "security": [{"bearerAuth": []}, {"cookieAuth": []}],
+        "parameters": [
+          {
+            "name": "goal_id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "string", "format": "uuid"},
+            "description": "목표 ID (UUID v4)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "조회 성공",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/GoalRead"}
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/UnauthorizedError"},
+          "404": {"$ref": "#/components/responses/NotFoundError"},
+          "422": {"$ref": "#/components/responses/ValidationError"}
+        }
+      },
+      "patch": {
+        "tags": ["goals"],
+        "summary": "목표 수정(음성 초안 확정)",
+        "description": "목표의 일부 필드를 수정합니다. **전달한 필드만** 업데이트됩니다 (`exclude_unset=True`).\n\n### 사용 패턴\n- 음성 초안 시트에서 사용자가 `target` 만 고치고 저장 → `PATCH {\"target\": \"기출 7개년 3회독\"}`\n- 시험일 연기 → `PATCH {\"date\": \"2026-10-15\"}`\n\n### 제약\n- 한 번에 최대 1~200자(시험명)/1~2000자(범위·목표) 안에서만 변경 가능\n- `source`, `transcript`, `created_at`, `updated_at` 는 변경 불가 (요청 바디에서 무시됨)\n",
+        "operationId": "update_goal",
+        "security": [{"bearerAuth": []}, {"cookieAuth": []}],
+        "parameters": [
+          {
+            "name": "goal_id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "string", "format": "uuid"},
+            "description": "목표 ID (UUID v4)"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "#/components/schemas/GoalUpdate"},
+              "examples": {
+                "target-only": {
+                  "summary": "목표만 변경",
+                  "value": {"target": "기출 7개년 3회독"}
+                },
+                "reschedule": {
+                  "summary": "시험일 연기",
+                  "value": {"date": "2026-10-15"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "수정 성공",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/GoalRead"}
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/UnauthorizedError"},
+          "404": {"$ref": "#/components/responses/NotFoundError"},
+          "422": {"$ref": "#/components/responses/ValidationError"}
+        }
+      },
+      "delete": {
+        "tags": ["goals"],
+        "summary": "목표 삭제",
+        "description": "목표를 영구 삭제합니다. 연관된 `transcript` 도 함께 사라집니다 (오디오는 저장하지 않음).",
+        "operationId": "delete_goal",
+        "security": [{"bearerAuth": []}, {"cookieAuth": []}],
+        "parameters": [
+          {
+            "name": "goal_id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "string", "format": "uuid"},
+            "description": "목표 ID (UUID v4)"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "삭제 성공 (응답 본문 없음)"
+          },
+          "401": {"$ref": "#/components/responses/UnauthorizedError"},
+          "404": {"$ref": "#/components/responses/NotFoundError"},
+          "422": {"$ref": "#/components/responses/ValidationError"}
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "JWT (HS256) 토큰. `Authorization: Bearer <jwt>` 헤더로 전송."
+      },
+      "cookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "access_token",
+        "description": "쿠키에 저장된 JWT. FE에서 `fetch` 의 `credentials: 'include'` 와 함께 사용."
+      }
+    },
+    "responses": {
+      "AudioValidationError": {
+        "description": "오디오 파일 검증 실패 (빈 파일, 미지원 포맷, 25MB 초과)",
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/AppError"},
+            "example": {
+              "detail": "오디오 파일이 비어 있습니다. 다시 녹음해 주세요.",
+              "code": "invalid_audio"
+            }
+          }
+        }
+      },
+      "UnauthorizedError": {
+        "description": "인증 필요 (운영 모드 + 토큰 누락/위조)",
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/AppError"},
+            "example": {"detail": "로그인이 필요합니다.", "code": "unauthorized"}
+          }
+        }
+      },
+      "NotFoundError": {
+        "description": "리소스 없음 또는 다른 사용자 소유",
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/AppError"},
+            "example": {"detail": "목표를 찾을 수 없습니다.", "code": "not_found"}
+          }
+        }
+      },
+      "ValidationError": {
+        "description": "Pydantic 검증 실패",
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/HTTPValidationError"},
+            "example": {
+              "detail": [
+                {"loc": ["body", "exam"], "msg": "field required", "type": "value_error.missing"}
+              ],
+              "code": "invalid_request"
+            }
+          }
+        }
+      },
+      "TranscriptionError": {
+        "description": "STT 호출 실패",
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/AppError"},
+            "example": {
+              "detail": "음성 인식에 실패했습니다. 잠시 후 다시 시도해 주세요.",
+              "code": "transcription_failed",
+              "meta": {"reason": "openai.AuthenticationError: Incorrect API key provided"}
+            }
+          }
+        }
+      },
+      "ExtractionError": {
+        "description": "LLM 추출 호출 실패",
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/AppError"},
+            "example": {
+              "detail": "구조화 추출에 실패했습니다.",
+              "code": "extraction_failed"
+            }
+          }
+        }
+      },
+      "ProviderErrors": {
+        "description": "외부 제공자(STT/LLM) 호출 실패",
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/AppError"}
+          }
+        }
+      },
+      "ProviderNotConfiguredError": {
+        "description": "`OPENAI_API_KEY` 미설정",
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/AppError"},
+            "example": {
+              "detail": "OPENAI_API_KEY가 설정되지 않았습니다. 관리자에게 문의해 주세요.",
+              "code": "provider_not_configured"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "title": "HealthResponse",
+        "description": "서버 상태·버전·OpenAI 설정 종합",
+        "required": ["status", "version", "now", "stt", "extractor", "openai_configured"],
+        "properties": {
+          "status": {"type": "string", "enum": ["ok"], "description": "항상 `ok`. 다른 값은 응답하지 않음.", "example": "ok"},
+          "version": {"type": "string", "description": "앱 버전 (semver)", "example": "0.1.0"},
+          "now": {"type": "string", "format": "date-time", "description": "서버 현재 시각 (Asia/Seoul)", "example": "2026-09-02T09:00:00+09:00"},
+          "stt": {
+            "type": "object",
+            "description": "STT 프로바이더 정보",
+            "required": ["provider", "model"],
+            "properties": {
+              "provider": {"type": "string", "enum": ["openai", "fake"], "example": "openai"},
+              "model": {"type": "string", "example": "gpt-4o-transcribe"}
+            }
+          },
+          "extractor": {
+            "type": "object",
+            "description": "추출기 프로바이더 정보",
+            "required": ["provider", "model"],
+            "properties": {
+              "provider": {"type": "string", "enum": ["openai", "heuristic"], "example": "openai"},
+              "model": {"type": "string", "example": "gpt-4o-mini"}
+            }
+          },
+          "openai_configured": {"type": "boolean", "description": "`OPENAI_API_KEY` 설정 여부", "example": true}
+        }
+      },
+      "VoiceTranscribeForm": {
+        "type": "object",
+        "title": "VoiceTranscribeForm",
+        "description": "음성 전사 multipart 폼",
+        "required": ["audio"],
+        "properties": {
+          "audio": {
+            "type": "string",
+            "format": "binary",
+            "contentMediaType": "application/octet-stream",
+            "description": "녹음 파일. webm/m4a/mp3/wav/ogg/flac, 최대 25MB."
+          },
+          "prompt": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 8000,
+            "description": "STT 인식 힌트. 도메인 어휘를 넣어두면 인식률이 올라감. 비우면 `DEFAULT_PROMPT` (학습 플래너 컨텍스트) 자동 주입."
+          }
+        }
+      },
+      "VoiceGoalForm": {
+        "type": "object",
+        "title": "VoiceGoalForm",
+        "description": "음성 → 목표 초안(+저장) multipart 폼",
+        "required": ["audio"],
+        "properties": {
+          "audio": {
+            "type": "string",
+            "format": "binary",
+            "contentMediaType": "application/octet-stream",
+            "description": "녹음 파일. webm/m4a/mp3/wav/ogg/flac, 최대 25MB."
+          },
+          "reference_date": {
+            "type": "string",
+            "format": "date",
+            "nullable": true,
+            "description": "상대 날짜 계산 기준일. 미지정 시 서버 기준 오늘 (`Asia/Seoul`).",
+            "example": "2026-09-02"
+          },
+          "save": {
+            "type": "boolean",
+            "default": false,
+            "description": "`true` 이고 4개 항목이 모두 채워지면(`draft.is_complete=true`) 즉시 DB 저장. 누락이 있으면 저장하지 않고 `saved: false` 로 응답."
+          }
+        }
+      },
+      "ParseGoalRequest": {
+        "type": "object",
+        "title": "ParseGoalRequest",
+        "description": "텍스트에서 4개 항목을 다시 추출",
+        "required": ["text"],
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "description": "전사 또는 사용자가 수정한 한국어 문장",
+            "examples": [
+              "시험명은 일반기계기사 필기고 시험일은 9월 26일이야. 범위는 재료역학이고 목표는 기출 7개년 2회독이야.",
+              "ADsP 시험 D-60, 범위는 데이터 분석 기획, 목표는 기출 5개년",
+              "다음 주 토요일에 토익 보고 싶어. 범위는 LC, 목표는 800점"
+            ]
+          },
+          "reference_date": {
+            "type": "string",
+            "format": "date",
+            "nullable": true,
+            "description": "상대 날짜 계산 기준일. 미지정 시 서버 기준 오늘.",
+            "example": "2026-09-02"
+          }
+        }
+      },
+      "TranscriptionResponse": {
+        "type": "object",
+        "title": "TranscriptionResponse",
+        "description": "ChatGPT Speech-to-Text 전사 결과",
+        "required": ["text", "model"],
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "전사된 텍스트. 한국어 기본 (`STT_LANGUAGE=ko`).",
+            "example": "시험명은 일반기계기사 필기고 시험일은 9월 26일이야."
+          },
+          "language": {
+            "type": "string",
+            "nullable": true,
+            "description": "감지/지정된 언어 코드 (ISO-639-1). `gpt-4o-transcribe` 는 추정값을 반환.",
+            "example": "ko"
+          },
+          "duration": {
+            "type": "number",
+            "format": "float",
+            "nullable": true,
+            "description": "원본 오디오 길이(초). **`whisper-1` 만 제공** (`verbose_json`).",
+            "example": 9.42
+          },
+          "model": {
+            "type": "string",
+            "description": "사용된 STT 모델명",
+            "example": "gpt-4o-transcribe",
+            "enum": ["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1", "fake-stt"]
+          }
+        }
+      },
+      "GoalDraft": {
+        "type": "object",
+        "title": "GoalDraft",
+        "description": "음성/텍스트에서 추출한 목표 초안. **누락된 항목은 `null`** 이며 `missing_fields` 에 키 목록이 채워집니다.",
+        "required": ["exam", "date", "scope", "target", "confidence", "provider", "missing_fields", "missing_labels", "is_complete", "needs_confirmation"],
+        "properties": {
+          "exam": {"type": "string", "nullable": true, "description": "시험명", "examples": ["일반기계기사 필기", "정보처리기사 실기", "ADsP"]},
+          "date": {
+            "type": "string",
+            "format": "date",
+            "nullable": true,
+            "description": "시험일. **음성에서 인식한 그대로의 확정값** (한국어 상대 표현은 기준 날짜로 계산됨).",
+            "examples": ["2026-09-26"]
+          },
+          "scope": {
+            "type": "string",
+            "nullable": true,
+            "description": "출제범위. 과목·단원을 `' · '` 로 구분.",
+            "examples": ["재료역학 · 기계열역학 · 기계유체역학"]
+          },
+          "target": {
+            "type": "string",
+            "nullable": true,
+            "description": "달성 목표",
+            "examples": ["기출 7개년 2회독", "LC 800점"]
+          },
+          "confidence": {
+            "type": "number",
+            "format": "float",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "default": 0.0,
+            "description": "추출 신뢰도. **0.7 미만이면 `needs_confirmation=true`**."
+          },
+          "provider": {
+            "type": "string",
+            "description": "사용한 추출기 식별자",
+            "examples": ["openai:gpt-4o-mini", "heuristic", "heuristic_fallback"]
+          },
+          "notes": {
+            "type": "string",
+            "nullable": true,
+            "description": "사용자 확인이 필요한 사항. 폴백 발생 시 이유 명시."
+          },
+          "missing_fields": {
+            "type": "array",
+            "readOnly": true,
+            "items": {"type": "string", "enum": ["exam", "date", "scope", "target"]},
+            "description": "비어 있는 4개 항목의 키 배열. FE에서 빨간 칸 표시용."
+          },
+          "missing_labels": {
+            "type": "array",
+            "readOnly": true,
+            "items": {"type": "string", "enum": ["시험명", "시험일", "출제범위", "목표"]},
+            "description": "`missing_fields` 의 한글 라벨 버전."
+          },
+          "is_complete": {
+            "type": "boolean",
+            "readOnly": true,
+            "description": "4개 항목이 모두 채워졌는지 여부."
+          },
+          "needs_confirmation": {
+            "type": "boolean",
+            "readOnly": true,
+            "description": "`missing_fields` 가 있거나 `confidence < 0.7` 이면 `true`. FE에서 재질문 UX 트리거."
+          }
+        }
+      },
+      "GoalDraftResponse": {
+        "type": "object",
+        "title": "GoalDraftResponse",
+        "description": "텍스트 → 초안 변환 결과 (저장 X)",
+        "required": ["transcript", "draft", "reference_date"],
+        "properties": {
+          "transcript": {"type": "string", "description": "입력으로 받은 텍스트"},
+          "draft": {"$ref": "#/components/schemas/GoalDraft"},
+          "reference_date": {"type": "string", "format": "date", "description": "상대 날짜 계산에 사용된 기준일"}
+        }
+      },
+      "VoiceGoalResponse": {
+        "type": "object",
+        "title": "VoiceGoalResponse",
+        "description": "음성 → 전사 → 추출 → (저장) 결과를 한 번에 반환",
+        "required": ["transcript", "draft", "reference_date", "stt_model"],
+        "properties": {
+          "transcript": {"type": "string", "description": "STT가 인식한 한국어 텍스트"},
+          "draft": {"$ref": "#/components/schemas/GoalDraft"},
+          "reference_date": {"type": "string", "format": "date", "description": "상대 날짜 계산에 사용된 기준일"},
+          "stt_model": {"type": "string", "description": "사용된 STT 모델명", "example": "gpt-4o-transcribe"},
+          "duration": {"type": "number", "format": "float", "nullable": true, "description": "원본 오디오 길이(초). `whisper-1` 만."},
+          "saved": {"type": "boolean", "default": false, "description": "`save=true` 이고 4개 항목이 모두 채워져 즉시 저장되었는지"},
+          "goal": {
+            "nullable": true,
+            "description": "저장에 성공한 경우에만 채워지는 목표 객체",
+            "oneOf": [
+              {"$ref": "#/components/schemas/GoalRead"},
+              {"type": "null"}
+            ]
+          }
+        }
+      },
+      "GoalCreate": {
+        "type": "object",
+        "title": "GoalCreate",
+        "description": "목표 생성 페이로드",
+        "required": ["exam", "date", "scope", "target"],
+        "properties": {
+          "exam": {"type": "string", "minLength": 1, "maxLength": 200, "description": "시험명", "example": "일반기계기사 필기"},
+          "date": {"type": "string", "format": "date", "description": "시험일", "example": "2026-09-26"},
+          "scope": {"type": "string", "minLength": 1, "maxLength": 2000, "description": "출제범위", "example": "재료역학 · 기계열역학"},
+          "target": {"type": "string", "minLength": 1, "maxLength": 2000, "description": "달성 목표", "example": "기출 7개년 2회독"},
+          "source": {"type": "string", "enum": ["voice", "manual"], "default": "manual", "description": "입력 출처"},
+          "transcript": {"type": "string", "nullable": true, "maxLength": 8000, "description": "원본 전사 텍스트 (음성 입력 시 보존)"}
+        }
+      },
+      "GoalUpdate": {
+        "type": "object",
+        "title": "GoalUpdate",
+        "description": "목표 부분 수정. **전달한 필드만** 반영 (`exclude_unset=True`).",
+        "properties": {
+          "exam": {"type": "string", "nullable": true, "minLength": 1, "maxLength": 200, "description": "시험명"},
+          "date": {"type": "string", "format": "date", "nullable": true, "description": "시험일"},
+          "scope": {"type": "string", "nullable": true, "minLength": 1, "maxLength": 2000, "description": "출제범위"},
+          "target": {"type": "string", "nullable": true, "minLength": 1, "maxLength": 2000, "description": "달성 목표"}
+        }
+      },
+      "GoalRead": {
+        "type": "object",
+        "title": "GoalRead",
+        "description": "저장된 목표 (응답 전용)",
+        "required": ["id", "exam", "date", "scope", "target", "source", "created_at", "updated_at", "d_day"],
+        "properties": {
+          "id": {"type": "string", "format": "uuid", "description": "UUID v4", "example": "f5c0d3a8-3a92-4b1d-9a8e-2e0a1b6c8d7e"},
+          "exam": {"type": "string", "description": "시험명"},
+          "date": {"type": "string", "format": "date", "description": "시험일"},
+          "scope": {"type": "string", "description": "출제범위"},
+          "target": {"type": "string", "description": "달성 목표"},
+          "source": {"type": "string", "enum": ["voice", "manual"], "description": "입력 출처"},
+          "transcript": {"type": "string", "nullable": true, "description": "원본 전사 텍스트"},
+          "created_at": {"type": "string", "format": "date-time", "description": "생성 시각"},
+          "updated_at": {"type": "string", "format": "date-time", "description": "최종 수정 시각"},
+          "d_day": {"type": "integer", "readOnly": true, "description": "오늘 기준 남은 일수. 음수면 과거."}
+        }
+      },
+      "AppError": {
+        "type": "object",
+        "title": "AppError",
+        "description": "에러 응답 공통 형식",
+        "required": ["detail", "code"],
+        "properties": {
+          "detail": {"type": "string", "description": "사용자에게 보여줄 메시지"},
+          "code": {"type": "string", "description": "머신 판독용 코드", "enum": ["invalid_audio", "transcription_failed", "extraction_failed", "provider_not_configured", "unauthorized", "not_found", "invalid_request", "http_error", "jwt_secret_missing", "internal_error"]},
+          "meta": {"type": "object", "additionalProperties": true, "description": "부가 정보 (디버깅·관측용)"}
+        }
+      },
+      "HTTPValidationError": {
+        "type": "object",
+        "title": "HTTPValidationError",
+        "description": "FastAPI 의 검증 실패 응답. `code` 는 항상 `invalid_request`.",
+        "required": ["detail"],
+        "properties": {
+          "detail": {
+            "type": "array",
+            "items": {"$ref": "#/components/schemas/ValidationError"}
+          },
+          "code": {"type": "string", "default": "invalid_request"}
+        }
+      },
+      "ValidationError": {
+        "type": "object",
+        "title": "ValidationError",
+        "description": "Pydantic 의 개별 필드 오류",
+        "required": ["loc", "msg", "type"],
+        "properties": {
+          "loc": {"type": "array", "items": {"type": "string"}, "description": "오류 발생 위치 경로", "example": ["body", "exam"]},
+          "msg": {"type": "string", "description": "오류 메시지"},
+          "type": {"type": "string", "description": "Pydantic 오류 타입", "example": "value_error.missing"},
+          "input": {"description": "원본 입력값"},
+          "ctx": {"type": "object", "additionalProperties": true}
+        }
+      }
+    }
+  }
+}
