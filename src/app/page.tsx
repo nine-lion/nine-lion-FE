@@ -97,7 +97,8 @@ const useVoiceScheduleCapture = (onResult: (result: ScheduleVoiceResult) => void
   useVoiceCapture<ScheduleVoiceResult>('/api/voice/schedule', onResult);
 
 function toHourWithMeridiem(match: RegExpMatchArray, meridiemOverride?: string): number {
-  const [, before, hourStr, minuteStr, after] = match;
+  const [, before, hourStr, minuteViaBun, minuteViaColon, after] = match;
+  const minuteStr = minuteViaBun || minuteViaColon;
   const meridiem = (meridiemOverride || before || after || '').toLowerCase();
   let hour = Number(hourStr);
   if (meridiem === '오후' || meridiem === 'pm') {
@@ -129,11 +130,11 @@ function parseNaturalEntry(text: string, fallback: Date): Omit<TimeBlock, 'id'>[
   if (/어제|yesterday/i.test(remaining)) entryDate.setDate(entryDate.getDate() - 1);
   if (/내일|tomorrow/i.test(remaining)) entryDate.setDate(entryDate.getDate() + 1);
 
-  const timeMatches = [...remaining.matchAll(/(오전|오후|am|pm)?\s*(\d{1,2})(?::(\d{2}))?\s*(오전|오후|am|pm)?/gi)];
+  const timeMatches = [...remaining.matchAll(/(오전|오후|am|pm)?\s*(\d{1,2})\s*시?\s*(?:(\d{1,2})\s*분|:(\d{2}))?\s*(오전|오후|am|pm)?/gi)];
   if (timeMatches.length < 2) return null;
   const start = toHourWithMeridiem(timeMatches[0]);
-  const startMeridiem = (timeMatches[0][1] || timeMatches[0][4] || '').toLowerCase();
-  const endHasMeridiem = Boolean(timeMatches[1][1] || timeMatches[1][4]);
+  const startMeridiem = (timeMatches[0][1] || timeMatches[0][5] || '').toLowerCase();
+  const endHasMeridiem = Boolean(timeMatches[1][1] || timeMatches[1][5]);
   let end = toHourWithMeridiem(timeMatches[1]);
   // "오후 8시에서 11시까지" — the second time omits AM/PM; if read literally it would
   // end before it starts, so assume the speaker meant it to carry the same meridiem.
@@ -307,11 +308,13 @@ function TimeBlockEditForm({
 }: {
   block: TimeBlock;
   blocks: TimeBlock[];
-  onSave: (id: number, patch: Omit<TimeBlock, 'id' | 'date'>) => void;
+  onSave: (id: number, segments: Omit<TimeBlock, 'id'>[]) => void;
   onDelete: (id: number) => void;
 }) {
   const [type, setType] = useState<TimeBlock['type']>(block.type);
   const [label, setLabel] = useState(block.label);
+  const [startDate, setStartDate] = useState(block.date);
+  const [endDate, setEndDate] = useState(block.date);
   const [start, setStart] = useState(hourToTimeValue(block.start));
   const [end, setEnd] = useState(hourToTimeValue(block.end));
   const [error, setError] = useState('');
@@ -320,26 +323,43 @@ function TimeBlockEditForm({
     event.preventDefault();
     const startHour = timeValueToHour(start);
     const endHour = timeValueToHour(end);
-    if (endHour <= startHour) { setError('종료 시간은 시작 시간보다 늦어야 해요.'); return; }
-    if (hasOverlap(blocks, block.date, startHour, endHour, block.id)) { setError('이미 등록된 시간과 겹쳐요.'); return; }
-    onSave(block.id, { start: startHour, end: endHour, type, label: label.trim() || BLOCK_TYPE_LABEL[type] });
+    const dayDiff = Math.round((new Date(`${endDate}T00:00:00`).getTime() - new Date(`${startDate}T00:00:00`).getTime()) / 86400000);
+    let segments: { date: string; start: number; end: number }[] | null = null;
+    if (dayDiff === 0 && endHour > startHour) {
+      segments = [{ date: startDate, start: startHour, end: endHour }];
+    } else if (dayDiff === 1) {
+      segments = [{ date: startDate, start: startHour, end: 24 }];
+      if (endHour > 0) segments.push({ date: endDate, start: 0, end: endHour });
+    }
+    if (!segments) { setError('종료 날짜/시간은 시작보다 늦어야 하고, 최대 하루까지만 이어질 수 있어요.'); return; }
+    if (segments.some((segment) => hasOverlap(blocks, segment.date, segment.start, segment.end, block.id))) {
+      setError('이미 등록된 시간과 겹쳐요.');
+      return;
+    }
+    onSave(block.id, segments.map((segment) => ({ ...segment, type, label: label.trim() || BLOCK_TYPE_LABEL[type] })));
   };
 
   return (
     <>
       <DialogHeader>
         <DialogTitle>시간 기록 조절</DialogTitle>
-        <DialogDescription>{`${block.date.replaceAll('-', '. ')} 기록을 5분 단위로 조절할 수 있어요.`}</DialogDescription>
+        <DialogDescription>시작과 종료의 날짜를 각각 고를 수 있어요. 자정을 넘기려면 종료 날짜를 다음 날로 바꿔주세요.</DialogDescription>
       </DialogHeader>
       <form onSubmit={submit} id="time-block-form">
         <FieldGroup>
           <Field orientation="responsive">
             <FieldLabel htmlFor="block-start">시작</FieldLabel>
-            <Input id="block-start" type="time" step={300} value={start} onChange={(event) => setStart(event.target.value)} required />
+            <div className="flex w-full gap-2">
+              <Input id="block-start" type="time" step={300} value={start} onChange={(event) => setStart(event.target.value)} required className="flex-1" />
+              <Input id="block-start-date" type="date" aria-label="시작 날짜" value={startDate} onChange={(event) => setStartDate(event.target.value)} required className="flex-1" />
+            </div>
           </Field>
           <Field orientation="responsive">
             <FieldLabel htmlFor="block-end">종료</FieldLabel>
-            <Input id="block-end" type="time" step={300} value={end} onChange={(event) => setEnd(event.target.value)} required />
+            <div className="flex w-full gap-2">
+              <Input id="block-end" type="time" step={300} value={end} onChange={(event) => setEnd(event.target.value)} required className="flex-1" />
+              <Input id="block-end-date" type="date" aria-label="종료 날짜" value={endDate} onChange={(event) => setEndDate(event.target.value)} required className="flex-1" />
+            </div>
           </Field>
           <Field orientation="responsive">
             <FieldLabel htmlFor="block-type">종류</FieldLabel>
@@ -379,7 +399,7 @@ function TimeBlockEditDialog({
   block: TimeBlock | null;
   blocks: TimeBlock[];
   onOpenChange: (open: boolean) => void;
-  onSave: (id: number, patch: Omit<TimeBlock, 'id' | 'date'>) => void;
+  onSave: (id: number, segments: Omit<TimeBlock, 'id'>[]) => void;
   onDelete: (id: number) => void;
 }) {
   return (
@@ -541,9 +561,13 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
     );
   };
   const editingBlock = blocks.find((block) => block.id === editingId) ?? null;
-  const updateBlock = (id: number, patch: Omit<TimeBlock, 'id' | 'date'>) => {
+  const updateBlock = (id: number, segments: Omit<TimeBlock, 'id'>[]) => {
     setUndoSnapshot(null);
-    setBlocks((previous) => previous.map((block) => (block.id === id ? { ...block, ...patch } : block)));
+    const baseId = Date.now();
+    setBlocks((previous) => [
+      ...previous.filter((block) => block.id !== id),
+      ...segments.map((segment, index) => ({ ...segment, id: index === 0 ? id : baseId + index })),
+    ]);
     setEditingId(null);
   };
   const deleteBlock = (id: number) => {
