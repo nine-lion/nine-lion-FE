@@ -56,6 +56,7 @@ import {
   type GoalRead,
   type VoiceGoalResponse,
 } from '@/lib/api/goals';
+import { createScheduleFromVoice, type VoiceScheduleResponse } from '@/lib/api/schedule';
 import { loadJSON, saveJSON } from '@/lib/storage';
 
 type BlockType = 'sleep' | 'study' | 'rest';
@@ -81,65 +82,11 @@ const timeValueToHour = (value: string) => {
 
 type VoiceStatus = 'idle' | 'recording' | 'processing' | 'error';
 
-// Generic voice capture for the calendar tab (uses legacy FE BFF until BE-AI
-// gains /goals/schedule endpoints).
-function useLegacyVoiceCapture<T>(endpoint: string, onResult: (result: T) => void) {
-  const [status, setStatus] = useState<VoiceStatus>('idle');
-  const [errorMessage, setErrorMessage] = useState('');
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
-
-  const start = async () => {
-    setErrorMessage('');
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setErrorMessage('이 브라우저는 음성 녹음을 지원하지 않아요.');
-      setStatus('error');
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      chunksRef.current = [];
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunksRef.current.push(event.data);
-      };
-      recorder.onstop = async () => {
-        stream.getTracks().forEach((track) => track.stop());
-        setStatus('processing');
-        try {
-          const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
-          const body = new FormData();
-          body.append('audio', blob, 'recording.webm');
-          body.append('referenceDate', APP_TODAY_ISO);
-          const response = await fetch(endpoint, { method: 'POST', body });
-          const data = await response.json();
-          if (!response.ok) throw new Error(data.error || '음성 처리에 실패했어요.');
-          onResult(data as T);
-          setStatus('idle');
-        } catch (error) {
-          setErrorMessage(error instanceof Error ? error.message : '음성 처리에 실패했어요.');
-          setStatus('error');
-        }
-      };
-      recorder.start();
-      recorderRef.current = recorder;
-      setStatus('recording');
-    } catch {
-      setErrorMessage('마이크 권한이 필요해요.');
-      setStatus('error');
-    }
-  };
-
-  const stop = () => {
-    recorderRef.current?.stop();
-  };
-
-  return { status, errorMessage, start, stop };
-}
-
-// Backs the planner's "voice" button — calls nine-lion-BE-AI /goals/voice.
-function useGoalVoiceCapture(handlers: {
-  onResult: (result: VoiceGoalResponse) => void;
+// Shared MediaRecorder plumbing. `capture` turns the recorded Blob into a
+// BE-AI API call (goals/voice or schedule/voice) — no Next.js BFF involved.
+function useVoiceRecorder<T>(handlers: {
+  capture: (blob: Blob) => Promise<T>;
+  onResult: (result: T) => void;
   onError: (message: string) => void;
 }) {
   const [status, setStatus] = useState<VoiceStatus>('idle');
@@ -167,10 +114,8 @@ function useGoalVoiceCapture(handlers: {
         stream.getTracks().forEach((track) => track.stop());
         setStatus('processing');
         try {
-          const blob = new Blob(chunksRef.current, {
-            type: recorder.mimeType || 'audio/webm',
-          });
-          const result = await createGoalFromVoice(blob, { referenceDate: APP_TODAY_ISO });
+          const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+          const result = await handlers.capture(blob);
           handlers.onResult(result);
           setStatus('idle');
         } catch (error) {
@@ -201,6 +146,30 @@ function useGoalVoiceCapture(handlers: {
   }, []);
 
   return { status, errorMessage, start, stop };
+}
+
+// Backs the planner's "voice" button — calls nine-lion-BE-AI /goals/voice.
+function useGoalVoiceCapture(handlers: {
+  onResult: (result: VoiceGoalResponse) => void;
+  onError: (message: string) => void;
+}) {
+  return useVoiceRecorder<VoiceGoalResponse>({
+    capture: (blob) => createGoalFromVoice(blob, { referenceDate: APP_TODAY_ISO }),
+    onResult: handlers.onResult,
+    onError: handlers.onError,
+  });
+}
+
+// Backs the calendar tab's voice entry points — calls nine-lion-BE-AI /schedule/voice.
+function useScheduleVoiceCapture(handlers: {
+  onResult: (result: VoiceScheduleResponse) => void;
+  onError: (message: string) => void;
+}) {
+  return useVoiceRecorder<VoiceScheduleResponse>({
+    capture: (blob) => createScheduleFromVoice(blob, { referenceDate: APP_TODAY_ISO }),
+    onResult: handlers.onResult,
+    onError: handlers.onError,
+  });
 }
 
 type GoalFormValues = { exam: string; date: string; scope: string; target: string };
@@ -1267,29 +1236,31 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
     setCreating(false);
   };
 
-  type ScheduleVoiceResult = {
-    segments: { start: string; end: string; type: BlockType; label: string }[];
-  };
-  const applyVoiceSchedule = (result: ScheduleVoiceResult) => {
-    if (result.segments.length === 0) {
-      setVoiceMessage('인식된 시간 기록이 없어요. 다시 말씀해주세요.');
-      return;
-    }
-    const baseId = Date.now();
-    const newBlocks: TimeBlock[] = result.segments.map((segment, index) => ({
-      id: baseId + index,
-      date: isoDate(today),
-      start: timeValueToHour(segment.start),
-      end: timeValueToHour(segment.end),
-      type: segment.type,
-      label: segment.label,
-    }));
-    setUndoSnapshot(blocks);
-    setBlocks((previous) => [...previous, ...newBlocks]);
-    setVoiceMessage(`${newBlocks.length}개 기록을 추가했어요.`);
-  };
+  const applyVoiceSchedule = useCallback(
+    (result: VoiceScheduleResponse) => {
+      if (result.segments.length === 0) {
+        setVoiceMessage('인식된 시간 기록이 없어요. 다시 말씀해주세요.');
+        return;
+      }
+      const baseId = Date.now();
+      const newBlocks: TimeBlock[] = result.segments.map((segment, index) => ({
+        id: baseId + index,
+        date: result.date,
+        start: timeValueToHour(segment.start),
+        end: timeValueToHour(segment.end),
+        type: segment.type,
+        label: segment.label,
+      }));
+      setUndoSnapshot(blocks);
+      setBlocks((previous) => [...previous, ...newBlocks]);
+      setVoiceMessage(`${newBlocks.length}개 기록을 추가했어요.`);
+    },
+    [blocks],
+  );
+  // Error text is already surfaced via the hook'''s own errorMessage
+  // (rendered as voiceError below), so onError here is a no-op.
   const { status: voiceStatus, errorMessage: voiceError, start: startVoiceRaw, stop: stopVoice } =
-    useLegacyVoiceCapture<ScheduleVoiceResult>('/api/voice/schedule', applyVoiceSchedule);
+    useScheduleVoiceCapture({ onResult: applyVoiceSchedule, onError: () => {} });
   const startVoice = () => {
     setVoiceMessage('');
     startVoiceRaw();
@@ -1378,9 +1349,15 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
         <YearMatrix year={month.getFullYear()} blocks={blocks} today={today} />
       )}
       <form className="command-bar" onSubmit={addNaturalEntry}>
-        <div className="command-icon">
-          <Sparkles aria-hidden="true" />
-        </div>
+        <button
+          type="button"
+          className={`command-icon ${voiceStatus === 'recording' ? 'recording' : ''}`}
+          aria-label={voiceStatus === 'recording' ? '녹음 중지' : '음성으로 기록 추가'}
+          disabled={voiceStatus === 'processing'}
+          onClick={voiceStatus === 'recording' ? stopVoice : startVoice}
+        >
+          {voiceStatus === 'recording' ? <Square aria-hidden="true" /> : <Sparkles aria-hidden="true" />}
+        </button>
         <label htmlFor="natural-entry" className="sr-only">
           자연어로 시간 기록 추가
         </label>
@@ -1391,10 +1368,11 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
             setPrompt(event.target.value);
             setMessage('');
           }}
-          placeholder="예: 오늘 03:00부터 08:00까지 잤어"
+          placeholder={voiceStatus === 'recording' ? '녹음 중이에요. 오늘 한 일을 말해주세요...' : voiceStatus === 'processing' ? '인식 중...' : '예: 오늘 03:00부터 08:00까지 잤어'}
+          disabled={voiceStatus === 'recording' || voiceStatus === 'processing'}
         />
-        <span className="command-hint">자연어로 기록</span>
-        <Button type="submit" size="icon" aria-label="시간 기록 추가">
+        <span className="command-hint">{voiceStatus === 'recording' || voiceStatus === 'processing' ? '음성 인식' : '자연어로 기록 · 별 아이콘을 눌러 음성 입력'}</span>
+        <Button type="submit" size="icon" aria-label="시간 기록 추가" disabled={voiceStatus === 'recording' || voiceStatus === 'processing'}>
           <Send />
         </Button>
         <output className="command-message" aria-live="polite">
