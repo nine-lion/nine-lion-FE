@@ -226,22 +226,21 @@ function ConnectionBanner() {
 function VoiceDraftReviewPanel({
   initial,
   onDismiss,
-  onApply,
+  onSync,
 }: {
   initial: { draft: GoalDraft; transcript: string; referenceDate: string };
   onDismiss: () => void;
-  onApply: (form: GoalFormValues, draft: GoalDraft) => void;
+  onSync: (form: GoalFormValues, draft: GoalDraft) => void;
 }) {
   // Remounted fresh per voice attempt via the `key` prop at the call site,
   // so these only need an initial value — no effect-based resync needed.
+  // The form below is already filled the moment this panel appears
+  // (handleVoiceResult does that); this panel is purely a review surface —
+  // there's no separate "apply" step, re-parsing pushes straight to the form.
   const [draft, setDraft] = useState<GoalDraft>(initial.draft);
   const [transcript, setTranscript] = useState(initial.transcript);
   const [reparsing, setReparsing] = useState(false);
   const [reparseError, setReparseError] = useState<string | null>(null);
-
-  const editField = (key: keyof GoalDraft, value: string) => {
-    setDraft((previous) => ({ ...previous, [key]: value || null }));
-  };
 
   const reparse = async () => {
     setReparsing(true);
@@ -249,6 +248,15 @@ function VoiceDraftReviewPanel({
     try {
       const result = await parseGoalText(transcript, initial.referenceDate);
       setDraft(result.draft);
+      onSync(
+        {
+          exam: result.draft.exam ?? '',
+          date: result.draft.date ?? '',
+          scope: result.draft.scope ?? '',
+          target: result.draft.target ?? '',
+        },
+        result.draft,
+      );
     } catch (error) {
       setReparseError(error instanceof ApiError ? error.message : '다시 추출하지 못했어요.');
     } finally {
@@ -256,17 +264,17 @@ function VoiceDraftReviewPanel({
     }
   };
 
-  const stillMissing = draft.missing_fields;
-
   return (
     <div className="voice-draft-panel">
       <div className="voice-draft-panel-header">
-        <h3>음성 초안 확인</h3>
+        <h3>음성 인식 결과</h3>
         <button type="button" className="voice-draft-panel-close" aria-label="닫기" onClick={onDismiss}>
           <X aria-hidden="true" />
         </button>
       </div>
-      <p className="text-caption text-muted-foreground">인식 결과를 검토하고 빠진 항목을 직접 입력해주세요.</p>
+      <p className="text-caption text-muted-foreground">
+        아래 폼에 자동으로 채워졌어요. 빠진 항목은 폼에서 직접 입력해주세요.
+      </p>
       <div className="flex flex-wrap items-center gap-2">
         <span className={draft.confidence < 0.7 ? 'text-caption text-warning-foreground' : 'text-caption'}>
           신뢰도 {(draft.confidence * 100).toFixed(0)}%
@@ -278,48 +286,11 @@ function VoiceDraftReviewPanel({
           </span>
         )}
       </div>
-      {stillMissing.length > 0 && (
+      {draft.missing_fields.length > 0 && (
         <p className="text-caption text-warning-foreground" role="alert">
           {`다음 항목이 인식되지 않았어요: ${draft.missing_labels.join(', ')}`}
         </p>
       )}
-      <FieldGroup>
-        <Field>
-          <FieldLabel htmlFor="draft-exam">시험명</FieldLabel>
-          <Input
-            id="draft-exam"
-            value={draft.exam ?? ''}
-            onChange={(event) => editField('exam', event.target.value)}
-            placeholder="예: 일반기계기사 필기"
-          />
-        </Field>
-        <Field>
-          <FieldLabel htmlFor="draft-date">시험일</FieldLabel>
-          <Input
-            id="draft-date"
-            type="date"
-            value={draft.date ?? ''}
-            onChange={(event) => editField('date', event.target.value)}
-          />
-        </Field>
-        <Field>
-          <FieldLabel htmlFor="draft-scope">출제범위</FieldLabel>
-          <Textarea
-            id="draft-scope"
-            value={draft.scope ?? ''}
-            onChange={(event) => editField('scope', event.target.value)}
-          />
-        </Field>
-        <Field>
-          <FieldLabel htmlFor="draft-target">목표</FieldLabel>
-          <Input
-            id="draft-target"
-            value={draft.target ?? ''}
-            onChange={(event) => editField('target', event.target.value)}
-            placeholder="예: 기출 7개년 2회독"
-          />
-        </Field>
-      </FieldGroup>
       <details className="text-caption text-muted-foreground" open>
         <summary className="cursor-pointer">원문 전사 (내가 말한 내용)</summary>
         <div className="mt-2 flex flex-col gap-2">
@@ -342,28 +313,6 @@ function VoiceDraftReviewPanel({
           </div>
         </div>
       </details>
-      <div className="voice-draft-panel-footer">
-        <Button type="button" variant="outline" onClick={onDismiss}>
-          닫기
-        </Button>
-        <Button
-          type="button"
-          disabled={stillMissing.length > 0}
-          onClick={() =>
-            onApply(
-              {
-                exam: draft.exam ?? '',
-                date: draft.date ?? '',
-                scope: draft.scope ?? '',
-                target: draft.target ?? '',
-              },
-              draft,
-            )
-          }
-        >
-          <Check aria-hidden="true" /> 폼에 채우기
-        </Button>
-      </div>
     </div>
   );
 }
@@ -554,14 +503,9 @@ function PlannerTab({ accountKey }: { accountKey: string }) {
             key={pendingDraft.transcript}
             initial={pendingDraft}
             onDismiss={() => setPendingDraft(null)}
-            onApply={(values) => {
+            onSync={(values) => {
               setForm(values);
               setSaved(false);
-              setVoiceHint({
-                kind: 'info',
-                message: '초안을 폼에 채웠어요. 빠진 항목을 입력한 뒤 저장하세요.',
-              });
-              setPendingDraft(null);
             }}
           />
         )}
