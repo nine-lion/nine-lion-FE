@@ -12,18 +12,16 @@ export default function AuthLayout({
       <div className="relative z-10 grid w-full max-w-6xl items-center gap-12 lg:grid-cols-2 lg:gap-20">
         <section className="flex flex-col gap-5 lg:gap-6">
           <p className="text-sm font-bold tracking-[0.18em] text-primary">
-            STUDY MATE
+            새 목표
           </p>
           <h1 className="text-[2rem] font-bold leading-tight tracking-tight text-foreground sm:text-4xl lg:text-[2.75rem] lg:leading-tight">
-            공부 자료를 올리면,
+            시험일까지,
             <br />
-            AI가 문제를 만들고
-            <br />
-            맞춤 학습을 해줘요.
+            할 일을 선명하게.
           </h1>
           <p className="max-w-md text-body leading-7 text-muted">
-            PDF를 업로드하면 문제를 생성하고, 학습 결과를 분석해 개인
-            맞춤형 학습을 제공해요.
+            시험과 범위를 적으면 실행 가능한 공부 목표의 시작점이
+            만들어집니다.
           </p>
         </section>
         <div className="w-full max-w-105 justify-self-center lg:justify-self-end">

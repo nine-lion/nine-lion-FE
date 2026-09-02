@@ -1,8 +1,9 @@
 'use client';
 
 import { FormEvent, useMemo, useState } from 'react';
-import { ArrowRight, BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, Plus, Send, Sparkles, Target } from 'lucide-react';
+import { ArrowRight, BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, Plus, Send, Sparkles, Target, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -15,6 +16,17 @@ const MONTHS = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8월', 
 const isoDate = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 const hourValue = (hour: string, minute: string) => Number(hour) + Number(minute || 0) / 60;
 const formatHour = (value: number) => `${String(Math.floor(value)).padStart(2, '0')}:${String(Math.round((value - Math.floor(value)) * 60)).padStart(2, '0')}`;
+
+const MINUTE_STEP = 5;
+const roundToStep = (minutes: number) => Math.round(minutes / MINUTE_STEP) * MINUTE_STEP;
+const hourToTimeValue = (hour: number) => {
+  const totalMinutes = Math.min(Math.max(roundToStep(Math.round(hour * 60)), 0), 23 * 60 + 55);
+  return `${String(Math.floor(totalMinutes / 60)).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}`;
+};
+const timeValueToHour = (value: string) => {
+  const [hour, minute] = value.split(':').map(Number);
+  return hour + roundToStep(minute || 0) / 60;
+};
 
 function parseNaturalEntry(text: string, fallback: Date): Omit<TimeBlock, 'id'> | null {
   const matches = [...text.matchAll(/(\d{1,2})(?::(\d{2}))?/g)];
@@ -80,7 +92,7 @@ function getMonthCells(month: Date) {
   });
 }
 
-function TimeMonthGrid({ month, blocks, today, variant }: { month: Date; blocks: TimeBlock[]; today: Date; variant: CalendarView }) {
+function TimeMonthGrid({ month, blocks, today, variant, onBlockClick }: { month: Date; blocks: TimeBlock[]; today: Date; variant: CalendarView; onBlockClick?: (id: number) => void }) {
   const cells = getMonthCells(month);
   return (
     <div className={`calendar-grid calendar-grid--${variant}`} role="grid" aria-label={`${month.getFullYear()}년 ${MONTHS[month.getMonth()]} 시간 기록`}>
@@ -93,7 +105,16 @@ function TimeMonthGrid({ month, blocks, today, variant }: { month: Date; blocks:
         return (
           <div key={dateKey} className={`day-cell ${outside ? 'outside' : ''} ${current ? 'current' : ''}`} role="gridcell" aria-label={`${date.getMonth() + 1}월 ${date.getDate()}일`}>
             <div className="day-number"><span>{date.getDate()}</span></div>
-            <div className="marker-track">{dayBlocks.map((block) => <div key={block.id} className={`time-block ${block.type}`} style={{ left: `${(block.start / 24) * 100}%`, width: `${((block.end - block.start) / 24) * 100}%` }} title={`${block.label} ${formatHour(block.start)}–${formatHour(block.end)}`} />)}</div>
+            <div className="marker-track">{dayBlocks.map((block) => (
+              <button
+                key={block.id}
+                type="button"
+                className={`time-block ${block.type}`}
+                style={{ left: `${(block.start / 24) * 100}%`, width: `${((block.end - block.start) / 24) * 100}%` }}
+                title={`${block.label} ${formatHour(block.start)}–${formatHour(block.end)} (클릭해서 조절)`}
+                onClick={(event) => { event.stopPropagation(); onBlockClick?.(block.id); }}
+              />
+            ))}</div>
             {variant === 'month' && dayBlocks.length > 0 && <div className="hours-total">{dayBlocks.filter((block) => block.type === 'study').reduce((sum, block) => sum + block.end - block.start, 0).toFixed(1)}h 공부</div>}
           </div>
         );
@@ -133,11 +154,98 @@ function YearMatrix({ year, blocks, today }: { year: number; blocks: TimeBlock[]
   );
 }
 
+function TimeBlockEditForm({
+  block,
+  onSave,
+  onDelete,
+}: {
+  block: TimeBlock;
+  onSave: (id: number, patch: Omit<TimeBlock, 'id' | 'date'>) => void;
+  onDelete: (id: number) => void;
+}) {
+  const [type, setType] = useState<TimeBlock['type']>(block.type);
+  const [label, setLabel] = useState(block.label);
+  const [start, setStart] = useState(hourToTimeValue(block.start));
+  const [end, setEnd] = useState(hourToTimeValue(block.end));
+  const [error, setError] = useState('');
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const startHour = timeValueToHour(start);
+    const endHour = timeValueToHour(end);
+    if (endHour <= startHour) { setError('종료 시간은 시작 시간보다 늦어야 해요.'); return; }
+    onSave(block.id, { start: startHour, end: endHour, type, label: label.trim() || (type === 'sleep' ? '수면' : '공부') });
+  };
+
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>시간 기록 조절</DialogTitle>
+        <DialogDescription>{`${block.date.replaceAll('-', '. ')} 기록을 5분 단위로 조절할 수 있어요.`}</DialogDescription>
+      </DialogHeader>
+      <form onSubmit={submit} id="time-block-form">
+        <FieldGroup>
+          <Field orientation="responsive">
+            <FieldLabel htmlFor="block-start">시작</FieldLabel>
+            <Input id="block-start" type="time" step={300} value={start} onChange={(event) => setStart(event.target.value)} required />
+          </Field>
+          <Field orientation="responsive">
+            <FieldLabel htmlFor="block-end">종료</FieldLabel>
+            <Input id="block-end" type="time" step={300} value={end} onChange={(event) => setEnd(event.target.value)} required />
+          </Field>
+          <Field orientation="responsive">
+            <FieldLabel htmlFor="block-type">종류</FieldLabel>
+            <select
+              id="block-type"
+              value={type}
+              onChange={(event) => setType(event.target.value as TimeBlock['type'])}
+              className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            >
+              <option value="study">공부</option>
+              <option value="sleep">수면</option>
+            </select>
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="block-label">메모</FieldLabel>
+            <Input id="block-label" value={label} onChange={(event) => setLabel(event.target.value)} placeholder="예: 재료역학" />
+          </Field>
+          {error && <p className="text-caption text-danger">{error}</p>}
+        </FieldGroup>
+      </form>
+      <DialogFooter>
+        <Button type="button" variant="outline" onClick={() => onDelete(block.id)}><Trash2 aria-hidden="true" /> 삭제</Button>
+        <Button type="submit" form="time-block-form">저장</Button>
+      </DialogFooter>
+    </>
+  );
+}
+
+function TimeBlockEditDialog({
+  block,
+  onOpenChange,
+  onSave,
+  onDelete,
+}: {
+  block: TimeBlock | null;
+  onOpenChange: (open: boolean) => void;
+  onSave: (id: number, patch: Omit<TimeBlock, 'id' | 'date'>) => void;
+  onDelete: (id: number) => void;
+}) {
+  return (
+    <Dialog open={block !== null} onOpenChange={onOpenChange}>
+      <DialogContent>
+        {block && <TimeBlockEditForm key={block.id} block={block} onSave={onSave} onDelete={onDelete} />}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function CalendarTab() {
   const today = useMemo(() => new Date(2026, 8, 1), []);
   const [month, setMonth] = useState(new Date(2026, 8, 1));
   const [view, setView] = useState<CalendarView>('month');
   const [prompt, setPrompt] = useState(''); const [message, setMessage] = useState('');
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [blocks, setBlocks] = useState<TimeBlock[]>([
     { id: 1, date: '2026-09-01', start: 1.5, end: 7.5, type: 'sleep', label: '수면' },
     { id: 2, date: '2026-09-01', start: 9, end: 11.5, type: 'study', label: '재료역학' },
@@ -164,6 +272,15 @@ function CalendarTab() {
     if (!parsed) { setMessage('시간 두 개를 포함해 적어주세요. 예: 오늘 19:00~22:00 공부'); return; }
     setBlocks((previous) => [...previous, { ...parsed, id: Date.now() }]); setPrompt(''); setMessage(`${parsed.label} ${formatHour(parsed.start)}–${formatHour(parsed.end)} 기록을 추가했어요.`);
   };
+  const editingBlock = blocks.find((block) => block.id === editingId) ?? null;
+  const updateBlock = (id: number, patch: Omit<TimeBlock, 'id' | 'date'>) => {
+    setBlocks((previous) => previous.map((block) => (block.id === id ? { ...block, ...patch } : block)));
+    setEditingId(null);
+  };
+  const deleteBlock = (id: number) => {
+    setBlocks((previous) => previous.filter((block) => block.id !== id));
+    setEditingId(null);
+  };
   return (
     <section className="calendar-shell" aria-labelledby="calendar-heading">
       <div className="calendar-toolbar">
@@ -176,12 +293,13 @@ function CalendarTab() {
         </div>
         <div className="calendar-legend" aria-label="시간 기록 범례"><span><i className="legend-dot sleep" />수면</span><span><i className="legend-dot study" />공부</span></div>
       </div>
-      {view === 'month' ? <TimeMonthGrid month={month} blocks={blocks} today={today} variant="month" /> : view === 'quarter' ? (
+      {view === 'month' ? <TimeMonthGrid month={month} blocks={blocks} today={today} variant="month" onBlockClick={setEditingId} /> : view === 'quarter' ? (
         <div className={`multi-calendar multi-calendar--${view}`}>
-          {visibleMonths.map((visibleMonth) => <section className="mini-month" key={`${visibleMonth.getFullYear()}-${visibleMonth.getMonth()}`}><h2>{MONTHS[visibleMonth.getMonth()]}</h2><TimeMonthGrid month={visibleMonth} blocks={blocks} today={today} variant={view} /></section>)}
+          {visibleMonths.map((visibleMonth) => <section className="mini-month" key={`${visibleMonth.getFullYear()}-${visibleMonth.getMonth()}`}><h2>{MONTHS[visibleMonth.getMonth()]}</h2><TimeMonthGrid month={visibleMonth} blocks={blocks} today={today} variant={view} onBlockClick={setEditingId} /></section>)}
         </div>
       ) : <YearMatrix year={month.getFullYear()} blocks={blocks} today={today} />}
       <form className="command-bar" onSubmit={addNaturalEntry}><div className="command-icon"><Sparkles aria-hidden="true" /></div><label htmlFor="natural-entry" className="sr-only">자연어로 시간 기록 추가</label><input id="natural-entry" value={prompt} onChange={(event) => { setPrompt(event.target.value); setMessage(''); }} placeholder="예: 오늘 03:00부터 08:00까지 잤어" /><span className="command-hint">자연어로 기록</span><Button type="submit" size="icon" aria-label="시간 기록 추가"><Send /></Button><output className="command-message" aria-live="polite">{message}</output></form>
+      <TimeBlockEditDialog block={editingBlock} onOpenChange={(open) => !open && setEditingId(null)} onSave={updateBlock} onDelete={deleteBlock} />
     </section>
   );
 }
