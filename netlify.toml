@@ -1,0 +1,42 @@
+# Netlify deployment config for nine-lion-FE.
+#
+# next.config.ts `rewrites()` works on Next.js dev and Vercel, but Netlify
+# doesn't honor Next.js rewrites for runtime proxying — so we replicate the
+# /api/* -> BE-AI proxy here as a Netlify redirect with status 200 (i.e.
+# the URL stays /api/* in the browser while Netlify fetches it server-side
+# and streams the response back).
+#
+# BE-AI URL matrix (set as Netlify env vars in the site dashboard):
+#   NEXT_PUBLIC_API_BASE_URL = the BE base URL WITH trailing slash stripped
+#                              from redirects. BE hosts below are examples
+#                              from nine-lion-BE-AI/app/core/config.py.
+#   production:    https://api.nine-lion.example
+#   preview/deploy:https://api.dev.nine-lion.example
+#
+# The client-side `fetch('/api/...')` call in src/lib/api/client.ts gets
+# prefixed with `NEXT_PUBLIC_API_BASE_URL` only on the server. On Netlify
+# we rely on the redirect below so the browser keeps hitting the FE
+# origin and Netlify forwards to BE — no CORS preflight needed.
+
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  # Override per-environment in the Netlify UI for production / branch previews.
+  NEXT_PUBLIC_API_BASE_URL = "https://api.dev.nine-lion.example"
+
+# Force the /api/* path to always go to BE-AI. `force = true` so existing
+# static assets in /api/* (none today) are bypassed too.
+[[redirects]]
+  from = "/api/*"
+  to = "https://api.dev.nine-lion.example/api/:splat"
+  status = 200
+  force = true
+
+# Cache nothing for these proxied calls — every page load should see fresh
+# goals from BE-AI, and the BE already does its own validation.
+[[headers]]
+  for = "/api/*"
+  [headers.values]
+    Cache-Control = "no-store"
