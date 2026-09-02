@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
-import { ArrowRight, BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, LogIn, LogOut, Send, Sparkles, Target, Trash2 } from 'lucide-react';
+import { ArrowRight, BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, LogIn, LogOut, Plus, Send, Sparkles, Target, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
@@ -257,12 +257,104 @@ const DEFAULT_BLOCKS: TimeBlock[] = [
 ];
 const blocksStorageKey = (accountKey: string) => `goalsetter:${accountKey}:blocks`;
 
+function TimeBlockCreateForm({
+  defaultDate,
+  onCreate,
+}: {
+  defaultDate: string;
+  onCreate: (block: Omit<TimeBlock, 'id'>) => void;
+}) {
+  const [date, setDate] = useState(defaultDate);
+  const [type, setType] = useState<TimeBlock['type']>('study');
+  const [label, setLabel] = useState('');
+  const [start, setStart] = useState('09:00');
+  const [end, setEnd] = useState('10:00');
+  const [error, setError] = useState('');
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const startHour = timeValueToHour(start);
+    const endHour = timeValueToHour(end);
+    if (endHour <= startHour) { setError('종료 시간은 시작 시간보다 늦어야 해요.'); return; }
+    onCreate({ date, start: startHour, end: endHour, type, label: label.trim() || (type === 'sleep' ? '수면' : '공부') });
+  };
+
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>시간 기록 추가</DialogTitle>
+        <DialogDescription>날짜와 시간을 5분 단위로 골라 새 기록을 추가할 수 있어요.</DialogDescription>
+      </DialogHeader>
+      <form onSubmit={submit} id="time-block-create-form">
+        <FieldGroup>
+          <Field orientation="responsive">
+            <FieldLabel htmlFor="new-block-date">날짜</FieldLabel>
+            <Input id="new-block-date" type="date" value={date} onChange={(event) => setDate(event.target.value)} required />
+          </Field>
+          <Field orientation="responsive">
+            <FieldLabel htmlFor="new-block-start">시작</FieldLabel>
+            <Input id="new-block-start" type="time" step={300} value={start} onChange={(event) => setStart(event.target.value)} required />
+          </Field>
+          <Field orientation="responsive">
+            <FieldLabel htmlFor="new-block-end">종료</FieldLabel>
+            <Input id="new-block-end" type="time" step={300} value={end} onChange={(event) => setEnd(event.target.value)} required />
+          </Field>
+          <Field orientation="responsive">
+            <FieldLabel htmlFor="new-block-type">종류</FieldLabel>
+            <select
+              id="new-block-type"
+              value={type}
+              onChange={(event) => setType(event.target.value as TimeBlock['type'])}
+              className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            >
+              <option value="study">공부</option>
+              <option value="sleep">수면</option>
+            </select>
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="new-block-label">메모</FieldLabel>
+            <Input id="new-block-label" value={label} onChange={(event) => setLabel(event.target.value)} placeholder="예: 재료역학" />
+          </Field>
+          {error && <p className="text-caption text-danger">{error}</p>}
+        </FieldGroup>
+      </form>
+      <DialogFooter>
+        <Button type="submit" form="time-block-create-form">추가</Button>
+      </DialogFooter>
+    </>
+  );
+}
+
+function TimeBlockCreateDialog({
+  open,
+  sessionId,
+  defaultDate,
+  onOpenChange,
+  onCreate,
+}: {
+  open: boolean;
+  sessionId: number;
+  defaultDate: string;
+  onOpenChange: (open: boolean) => void;
+  onCreate: (block: Omit<TimeBlock, 'id'>) => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        {open && <TimeBlockCreateForm key={sessionId} defaultDate={defaultDate} onCreate={onCreate} />}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function CalendarTab({ accountKey }: { accountKey: string }) {
   const today = useMemo(() => new Date(2026, 8, 1), []);
   const [month, setMonth] = useState(new Date(2026, 8, 1));
   const [view, setView] = useState<CalendarView>('month');
   const [prompt, setPrompt] = useState(''); const [message, setMessage] = useState('');
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [createSessionId, setCreateSessionId] = useState(0);
   const [blocks, setBlocks] = useState<TimeBlock[]>(() => loadJSON(blocksStorageKey(accountKey), DEFAULT_BLOCKS));
   useEffect(() => { saveJSON(blocksStorageKey(accountKey), blocks); }, [accountKey, blocks]);
   const step = view === 'month' ? 1 : view === 'quarter' ? 3 : 12;
@@ -292,6 +384,11 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
     setBlocks((previous) => previous.filter((block) => block.id !== id));
     setEditingId(null);
   };
+  const openCreate = () => { setCreateSessionId((previous) => previous + 1); setCreating(true); };
+  const createBlock = (block: Omit<TimeBlock, 'id'>) => {
+    setBlocks((previous) => [...previous, { ...block, id: Date.now() }]);
+    setCreating(false);
+  };
   return (
     <section className="calendar-shell" aria-labelledby="calendar-heading">
       <div className="calendar-toolbar">
@@ -302,7 +399,7 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
           </div>
           <div className="calendar-controls"><Button variant="outline" size="icon" aria-label="이전 기간" onClick={() => shiftMonth(-1)}><ChevronLeft /></Button><Button variant="outline" onClick={() => setMonth(new Date(2026, 8, 1))}>오늘</Button><Button variant="outline" size="icon" aria-label="다음 기간" onClick={() => shiftMonth(1)}><ChevronRight /></Button></div>
         </div>
-        <div className="calendar-legend" aria-label="시간 기록 범례"><span><i className="legend-dot sleep" />수면</span><span><i className="legend-dot study" />공부</span></div>
+        <div className="calendar-legend" aria-label="시간 기록 범례"><span><i className="legend-dot sleep" />수면</span><span><i className="legend-dot study" />공부</span><Button size="icon" variant="outline" aria-label="새 시간 기록 추가" onClick={openCreate}><Plus aria-hidden="true" /></Button></div>
       </div>
       {view === 'month' ? <TimeMonthGrid month={month} blocks={blocks} today={today} variant="month" onBlockClick={setEditingId} /> : view === 'quarter' ? (
         <div className={`multi-calendar multi-calendar--${view}`}>
@@ -311,6 +408,7 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
       ) : <YearMatrix year={month.getFullYear()} blocks={blocks} today={today} />}
       <form className="command-bar" onSubmit={addNaturalEntry}><div className="command-icon"><Sparkles aria-hidden="true" /></div><label htmlFor="natural-entry" className="sr-only">자연어로 시간 기록 추가</label><input id="natural-entry" value={prompt} onChange={(event) => { setPrompt(event.target.value); setMessage(''); }} placeholder="예: 오늘 03:00부터 08:00까지 잤어" /><span className="command-hint">자연어로 기록</span><Button type="submit" size="icon" aria-label="시간 기록 추가"><Send /></Button><output className="command-message" aria-live="polite">{message}</output></form>
       <TimeBlockEditDialog block={editingBlock} onOpenChange={(open) => !open && setEditingId(null)} onSave={updateBlock} onDelete={deleteBlock} />
+      <TimeBlockCreateDialog open={creating} sessionId={createSessionId} defaultDate={isoDate(today)} onOpenChange={setCreating} onCreate={createBlock} />
     </section>
   );
 }
