@@ -179,7 +179,7 @@
 .section-kicker { display: flex; align-items: center; gap: 8px; color: var(--primary); font-size: 13px; font-weight: 750; letter-spacing: .04em; }
 .section-kicker svg { width: 17px; }
 .goal-editor h1 { max-width: 620px; font-size: clamp(31px,4vw,54px); letter-spacing: -.055em; line-height: 1.08; margin: 18px 0 13px; font-weight: 740; }
-.section-copy { color: var(--muted-foreground); font-size: 16px; line-height: 1.7; margin: 0 0 38px; }
+.section-copy { color: var(--muted-foreground); font-size: 16px; line-height: 1.7; margin: 0 0 38px; }.voice-input-bar { padding: 10px 4px; margin-bottom: 22px; }
 .goal-fields { display: grid; grid-template-columns: 1.35fr .65fr; gap: 22px 18px; }
 
 .voice-draft-panel { background: var(--primary-muted); border: 1px solid color-mix(in oklch,var(--primary),transparent 70%); border-radius: 16px; padding: 18px 20px; margin: 4px 0 22px; display: flex; flex-direction: column; gap: 10px; }.voice-draft-panel-header { display: flex; align-items: center; justify-content: space-between; }.voice-draft-panel-header h3 { margin: 0; font-size: 15px; font-weight: 750; letter-spacing: -.01em; }.voice-draft-panel-close { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; background: transparent; border: 0; color: var(--muted-foreground); cursor: pointer; }.voice-draft-panel-close:hover { background: rgba(0,0,0,.05); color: var(--foreground); }.voice-draft-panel-close svg { width: 15px; height: 15px; }
