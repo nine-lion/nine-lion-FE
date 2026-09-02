@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useMemo, useState, useSyncExternalStore } from 'react';
+import { FormEvent, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { ArrowRight, BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, LogIn, LogOut, Send, Sparkles, Target, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -9,7 +9,8 @@ import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
-import { isAuthenticated } from '@/lib/auth';
+import { getAccountKey, getServerAccountKey, isAuthenticated } from '@/lib/auth';
+import { loadJSON, saveJSON } from '@/lib/storage';
 
 type Goal = { id: number; exam: string; date: string; scope: string; target: string };
 type TimeBlock = { id: number; date: string; start: number; end: number; type: 'sleep' | 'study'; label: string };
@@ -43,8 +44,12 @@ function parseNaturalEntry(text: string, fallback: Date): Omit<TimeBlock, 'id'> 
   return { date: isoDate(entryDate), start, end: end < start ? 24 : end, type, label: type === 'sleep' ? '수면' : '공부' };
 }
 
-function PlannerTab() {
-  const [goals, setGoals] = useState<Goal[]>([{ id: 1, exam: '일반기계기사 필기', date: '2026-09-26', scope: '재료역학 · 기계열역학 · 기계유체역학 · 기계재료 및 유압기기', target: '기출 7개년 2회독 + 오답노트 완성' }]);
+const DEFAULT_GOALS: Goal[] = [{ id: 1, exam: '일반기계기사 필기', date: '2026-09-26', scope: '재료역학 · 기계열역학 · 기계유체역학 · 기계재료 및 유압기기', target: '기출 7개년 2회독 + 오답노트 완성' }];
+const goalsStorageKey = (accountKey: string) => `goalsetter:${accountKey}:goals`;
+
+function PlannerTab({ accountKey }: { accountKey: string }) {
+  const [goals, setGoals] = useState<Goal[]>(() => loadJSON(goalsStorageKey(accountKey), DEFAULT_GOALS));
+  useEffect(() => { saveJSON(goalsStorageKey(accountKey), goals); }, [accountKey, goals]);
   const [form, setForm] = useState({ exam: '', date: '', scope: '', target: '' });
   const [saved, setSaved] = useState(false);
   const update = (key: keyof typeof form, value: string) => { setSaved(false); setForm((previous) => ({ ...previous, [key]: value })); };
@@ -242,20 +247,24 @@ function TimeBlockEditDialog({
   );
 }
 
-function CalendarTab() {
+const DEFAULT_BLOCKS: TimeBlock[] = [
+  { id: 1, date: '2026-09-01', start: 1.5, end: 7.5, type: 'sleep', label: '수면' },
+  { id: 2, date: '2026-09-01', start: 9, end: 11.5, type: 'study', label: '재료역학' },
+  { id: 3, date: '2026-09-01', start: 14, end: 17, type: 'study', label: '기출 풀이' },
+  { id: 4, date: '2026-09-02', start: 2.5, end: 8, type: 'sleep', label: '수면' },
+  { id: 5, date: '2026-09-02', start: 19, end: 22, type: 'study', label: '열역학' },
+  { id: 6, date: '2026-09-03', start: 0, end: 6.5, type: 'sleep', label: '수면' },
+];
+const blocksStorageKey = (accountKey: string) => `goalsetter:${accountKey}:blocks`;
+
+function CalendarTab({ accountKey }: { accountKey: string }) {
   const today = useMemo(() => new Date(2026, 8, 1), []);
   const [month, setMonth] = useState(new Date(2026, 8, 1));
   const [view, setView] = useState<CalendarView>('month');
   const [prompt, setPrompt] = useState(''); const [message, setMessage] = useState('');
   const [editingId, setEditingId] = useState<number | null>(null);
-  const [blocks, setBlocks] = useState<TimeBlock[]>([
-    { id: 1, date: '2026-09-01', start: 1.5, end: 7.5, type: 'sleep', label: '수면' },
-    { id: 2, date: '2026-09-01', start: 9, end: 11.5, type: 'study', label: '재료역학' },
-    { id: 3, date: '2026-09-01', start: 14, end: 17, type: 'study', label: '기출 풀이' },
-    { id: 4, date: '2026-09-02', start: 2.5, end: 8, type: 'sleep', label: '수면' },
-    { id: 5, date: '2026-09-02', start: 19, end: 22, type: 'study', label: '열역학' },
-    { id: 6, date: '2026-09-03', start: 0, end: 6.5, type: 'sleep', label: '수면' },
-  ]);
+  const [blocks, setBlocks] = useState<TimeBlock[]>(() => loadJSON(blocksStorageKey(accountKey), DEFAULT_BLOCKS));
+  useEffect(() => { saveJSON(blocksStorageKey(accountKey), blocks); }, [accountKey, blocks]);
   const step = view === 'month' ? 1 : view === 'quarter' ? 3 : 12;
   const shiftMonth = (amount: number) => setMonth((previous) => new Date(previous.getFullYear(), previous.getMonth() + amount * step, 1));
   const quarterStart = Math.floor(month.getMonth() / 3) * 3;
@@ -319,5 +328,6 @@ function AuthButton() {
 }
 
 export default function Home() {
-  return <main className="app-shell"><Tabs defaultValue="planner" className="app-tabs"><header className="topbar"><a href="#" className="brand" aria-label="Goalsetter 홈"><span className="brand-mark"><Clock3 aria-hidden="true" /></span><span>Goalsetter</span></a><TabsList className="main-nav" aria-label="주요 메뉴"><TabsTrigger value="planner"><Target aria-hidden="true" />목표 계획</TabsTrigger><TabsTrigger value="calendar"><CalendarDays aria-hidden="true" />타임 캘린더</TabsTrigger></TabsList><AuthButton /></header><div className="content-wrap"><TabsContent value="planner"><PlannerTab /></TabsContent><TabsContent value="calendar"><CalendarTab /></TabsContent></div></Tabs></main>;
+  const accountKey = useSyncExternalStore(noopSubscribe, getAccountKey, getServerAccountKey);
+  return <main className="app-shell"><Tabs defaultValue="planner" className="app-tabs"><header className="topbar"><a href="#" className="brand" aria-label="Goalsetter 홈"><span className="brand-mark"><Clock3 aria-hidden="true" /></span><span>Goalsetter</span></a><TabsList className="main-nav" aria-label="주요 메뉴"><TabsTrigger value="planner"><Target aria-hidden="true" />목표 계획</TabsTrigger><TabsTrigger value="calendar"><CalendarDays aria-hidden="true" />타임 캘린더</TabsTrigger></TabsList><AuthButton /></header><div className="content-wrap"><TabsContent value="planner"><PlannerTab key={accountKey} accountKey={accountKey} /></TabsContent><TabsContent value="calendar"><CalendarTab key={accountKey} accountKey={accountKey} /></TabsContent></div></Tabs></main>;
 }

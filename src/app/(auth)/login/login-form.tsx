@@ -20,8 +20,8 @@ export function LoginForm() {
 
   const loginMutation = useMutation({
     mutationFn: login,
-    onSuccess: () => {
-      markAuthenticated();
+    onSuccess: (data) => {
+      markAuthenticated(data.user.email);
       router.push('/');
       router.refresh();
     },
