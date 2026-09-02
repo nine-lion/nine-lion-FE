@@ -220,35 +220,6 @@ function ConnectionBanner() {
   );
 }
 
-// Lightweight "here's what I heard" confirmation, shown after every voice
-// capture (goal + schedule) so the user can verify STT picked up the right
-// words — independent of whether the extracted data was complete enough to
-// need the heavier DraftConfirmDialog below.
-function VoiceTranscriptDialog({
-  result,
-  onClose,
-}: {
-  result: { transcript: string; message: string } | null;
-  onClose: () => void;
-}) {
-  return (
-    <Dialog open={result !== null} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>음성 인식 결과</DialogTitle>
-          <DialogDescription>{result?.message}</DialogDescription>
-        </DialogHeader>
-        <p className="transcript-preview">{result?.transcript}</p>
-        <DialogFooter>
-          <Button type="button" onClick={onClose}>
-            확인
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 // Renders inline inside the goal-editor card (not a modal) — an incomplete
 // or low-confidence voice extraction is reviewed right where the form
 // already lives, instead of interrupting with a popup.
@@ -410,10 +381,6 @@ function PlannerTab({ accountKey }: { accountKey: string }) {
     transcript: string;
     referenceDate: string;
   } | null>(null);
-  const [transcriptResult, setTranscriptResult] = useState<{ transcript: string; message: string } | null>(
-    null,
-  );
-
   const goalsQuery = useQuery({
     queryKey: GOALS_QUERY_KEY,
     queryFn: () => listGoals({ limit: 50 }),
@@ -473,10 +440,6 @@ function PlannerTab({ accountKey }: { accountKey: string }) {
         setVoiceHint({
           kind: 'info',
           message: `음성으로 인식한 목표를 저장했어요. (신뢰도 ${(result.draft.confidence * 100).toFixed(0)}%)`,
-        });
-        setTranscriptResult({
-          transcript: result.transcript,
-          message: `이렇게 인식해서 목표를 저장했어요. (신뢰도 ${(result.draft.confidence * 100).toFixed(0)}%)`,
         });
         return;
       }
@@ -724,7 +687,6 @@ function PlannerTab({ accountKey }: { accountKey: string }) {
           </article>
         ))}
       </aside>
-      <VoiceTranscriptDialog result={transcriptResult} onClose={() => setTranscriptResult(null)} />
     </div>
   );
 }
