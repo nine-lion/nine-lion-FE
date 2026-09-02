@@ -1,8 +1,10 @@
 'use client';
 
 import { FormEvent, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import type { CSSProperties } from 'react';
 import Link from 'next/link';
-import { ArrowRight, BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, LogIn, LogOut, Mic, Plus, Send, Sparkles, Square, Target, Trash2 } from 'lucide-react';
+import { ArrowRight, BookOpen, Brain, CalendarDays, CalendarRange, Check, ChevronLeft, ChevronRight, Clock3, Coffee, ListChecks, LogIn, LogOut, Mic, Moon, Plus, Send, Sparkles, Square, Target, Trash2, TrendingUp, Utensils, Wind } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
@@ -11,6 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { getAccountKey, getServerAccountKey, isAuthenticated } from '@/lib/auth';
 import { loadJSON, saveJSON } from '@/lib/storage';
+import { formatClockKo, formatMinutesKo } from '@/lib/time';
 
 type Goal = { id: number; exam: string; date: string; scope: string; target: string };
 type BlockType = 'sleep' | 'study' | 'rest';
@@ -34,7 +37,7 @@ const timeValueToHour = (value: string) => {
 const hasOverlap = (blocks: TimeBlock[], date: string, start: number, end: number, excludeId?: number) =>
   blocks.some((block) => block.id !== excludeId && block.date === date && start < block.end && end > block.start);
 
-const APP_TODAY_ISO = '2026-09-01';
+const APP_TODAY_ISO = '2026-09-03';
 
 type VoiceStatus = 'idle' | 'recording' | 'processing' | 'error';
 
@@ -217,7 +220,7 @@ function PlannerTab({ accountKey }: { accountKey: string }) {
       <aside className="goal-list" aria-label="내 시험 목표">
         <div className="goal-list-heading"><div><span className="eyebrow">MY GOALS</span><h2>다가오는 시험</h2></div><span className="goal-count">{goals.length}</span></div>
         {goals.map((goal, index) => {
-          const days = Math.max(0, Math.ceil((new Date(`${goal.date}T00:00:00`).getTime() - new Date('2026-09-01T00:00:00').getTime()) / 86400000));
+          const days = Math.max(0, Math.ceil((new Date(`${goal.date}T00:00:00`).getTime() - new Date('2026-09-03T00:00:00').getTime()) / 86400000));
           return <article key={goal.id} className={`goal-card ${index === 0 ? 'featured' : ''}`}><div className="goal-card-top"><span>D-{days}</span><CalendarDays aria-hidden="true" /></div><h3>{goal.exam}</h3><time dateTime={goal.date}>{goal.date.replaceAll('-', '. ')}</time><div className="scope-line"><BookOpen aria-hidden="true" /><p>{goal.scope}</p></div><div className="target-pill"><Target aria-hidden="true" />{goal.target}</div></article>;
         })}
       </aside>
@@ -411,15 +414,212 @@ function TimeBlockEditDialog({
   );
 }
 
-const DEFAULT_BLOCKS: TimeBlock[] = [
-  { id: 1, date: '2026-09-01', start: 1.5, end: 7.5, type: 'sleep', label: '수면' },
-  { id: 2, date: '2026-09-01', start: 9, end: 11.5, type: 'study', label: '재료역학' },
-  { id: 3, date: '2026-09-01', start: 14, end: 17, type: 'study', label: '기출 풀이' },
-  { id: 4, date: '2026-09-02', start: 2.5, end: 8, type: 'sleep', label: '수면' },
-  { id: 5, date: '2026-09-02', start: 19, end: 22, type: 'study', label: '열역학' },
-  { id: 6, date: '2026-09-03', start: 0, end: 6.5, type: 'sleep', label: '수면' },
-];
+const SEED_STUDY_TOPICS = ['재료역학', '기계열역학', '기계유체역학', '유압기기', '기출 풀이', '오답노트 정리'];
+const REST_ACTIVITY_POOL = ['휴식', '게임', '친구들과 약속', '외식', '넷플릭스', '헬스장', '카페', 'PC방', '축구', '술자리'];
+const roundToFiveMin = (hour: number) => Math.round(hour * 12) / 12;
+const HOLIDAY_DATE = '2026-08-15'; // 광복절 — compensation-mindset slacking day
+const FORCED_SLEEP_FROM_DATE = '2026-08-17';
+const FORCED_SLEEP_TO_DATE = '2026-08-18'; // 11:10PM -> 7:00AM, an explicit pre-midnight example
+
+// Deterministic PRNG (mulberry32) so the mock month looks organically noisy
+// but is still reproducible on every load instead of reshuffling itself.
+function mulberry32(seed: number) {
+  let state = seed;
+  return () => {
+    state |= 0;
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+type SeedEvent = { hint: number; duration: number; meal?: string; study?: boolean };
+
+function buildSeedBlocks(): TimeBlock[] {
+  const rand = mulberry32(20260903);
+  const randRange = (min: number, max: number) => min + rand() * (max - min);
+  const chance = (probability: number) => rand() < probability;
+  const pick = <T,>(arr: T[]): T => arr[Math.floor(rand() * arr.length)];
+  const shuffledIndices = (count: number) => {
+    const list = Array.from({ length: count }, (_, index) => index);
+    for (let i = list.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(rand() * (i + 1));
+      [list[i], list[j]] = [list[j], list[i]];
+    }
+    return list;
+  };
+
+  const start = new Date(2026, 7, 5); // 2026-08-05
+  const end = new Date(2026, 8, 3); // 2026-09-03, about 30 days later
+  const dayCount = Math.round((end.getTime() - start.getTime()) / 86400000) + 1;
+
+  const weekdayIndices = shuffledIndices(dayCount).filter((index) => {
+    const d = new Date(start);
+    d.setDate(d.getDate() + index);
+    const weekday = d.getDay();
+    return weekday !== 0 && weekday !== 6;
+  });
+  const allNighterDays = new Set(weekdayIndices.slice(0, 2)); // 10h+ cramming, barely sleeps
+  const burnoutZeroDays = new Set(weekdayIndices.slice(2, 5)); // skips studying entirely
+
+  // Which real Monday-start week each day falls in, so Mon->Fri "작심삼일" decay
+  // and the one steady week line up with actual weekdays.
+  const weekOfDay: number[] = [];
+  {
+    let weekIndex = -1;
+    const weekCursor = new Date(start);
+    for (let i = 0; i < dayCount; i += 1) {
+      if (weekCursor.getDay() === 1) weekIndex += 1;
+      weekOfDay.push(weekIndex);
+      weekCursor.setDate(weekCursor.getDate() + 1);
+    }
+  }
+  const totalWeeks = Math.max(...weekOfDay) + 1;
+  const steadyWeekIndex = Math.min(2, totalWeeks - 1); // one week that doesn't decay Mon->Fri
+
+  const allBlocks: Omit<TimeBlock, 'id'>[] = [];
+  const cursor = new Date(start);
+  let prevDate: string | null = null;
+  let prevDayLastEnd = 0;
+
+  for (let dayIndex = 0; dayIndex < dayCount; dayIndex += 1) {
+    const date = isoDate(cursor);
+    const weekday = cursor.getDay(); // 0 = Sun .. 6 = Sat
+    const isWeekend = weekday === 0 || weekday === 6;
+    const dayBlocks: Omit<TimeBlock, 'id'>[] = [];
+
+    // Appends a block after whatever's already been placed today, so random
+    // durations never overlap no matter how they're combined.
+    const place = (startHint: number, duration: number, type: BlockType, label: string) => {
+      const prevEnd = dayBlocks.length ? dayBlocks[dayBlocks.length - 1].end + 0.1 : 0;
+      const blockStart = roundToFiveMin(Math.max(startHint, prevEnd));
+      const blockEnd = roundToFiveMin(Math.min(24, blockStart + duration));
+      if (blockEnd <= blockStart) return;
+      dayBlocks.push({ date, start: blockStart, end: blockEnd, type, label });
+    };
+
+    if (date === HOLIDAY_DATE) {
+      // Public holiday: compensation-mindset slacking — barely logs anything, no study.
+      place(13, 1, 'rest', '점심');
+      place(19.5, 3.5, 'rest', '게임');
+    } else if (allNighterDays.has(dayIndex)) {
+      // All-night cramming binge: 13+ hours of study, only a short nap.
+      place(0.5, 5.5, 'study', '벼락치기');
+      if (chance(0.6)) place(6.25, 0.5, 'rest', '아침');
+      place(7, 6, 'study', '벼락치기');
+      if (chance(0.6)) place(13.25, 0.5, 'rest', '점심');
+      place(14, 2, 'sleep', '쪽잠');
+      if (chance(0.6)) place(17.5, 0.5, 'rest', '저녁');
+      place(19, 2, 'study', '벼락치기');
+    } else if (burnoutZeroDays.has(dayIndex)) {
+      // Burnout: no study at all, oversleeps to recover.
+      place(randRange(0.5, 2), randRange(9, 11), 'sleep', '수면');
+      if (chance(0.5)) place(11.5, 0.5, 'rest', '아침');
+      place(13, randRange(2.5, 4.5), 'rest', pick(REST_ACTIVITY_POOL));
+      if (chance(0.6)) place(19, 0.5, 'rest', '저녁');
+    } else {
+      const mondayOffset = weekday - 1; // Mon=0 .. Fri=4
+      const isSteadyWeek = weekOfDay[dayIndex] === steadyWeekIndex;
+
+      const pickWakeHour = () => {
+        if (isWeekend) {
+          const lateStart = chance(0.45);
+          return lateStart ? randRange(10.5, 14.5) : randRange(8, 10.5);
+        }
+        const base = isSteadyWeek ? randRange(7.3, 8.3) : 6.8 + mondayOffset * 0.9 + randRange(-0.3, 0.5);
+        return Math.max(6, Math.min(12, base));
+      };
+
+      // Last night's sleep: sometimes a pre-midnight bedtime split across two
+      // dates (tail block tonight, head block tomorrow), sometimes a single
+      // post-midnight block — not always "went to bed after 12".
+      const forcedSleep = prevDate === FORCED_SLEEP_FROM_DATE && date === FORCED_SLEEP_TO_DATE;
+      const canPreMidnight = prevDayLastEnd < 23.4 && prevDate !== null && prevDate !== HOLIDAY_DATE;
+      let wakeHour: number;
+
+      if (forcedSleep) {
+        const bedtime = roundToFiveMin(Math.max(23 + 10 / 60, prevDayLastEnd + 0.15));
+        allBlocks.push({ date: prevDate as string, start: bedtime, end: 24, type: 'sleep', label: '수면' });
+        wakeHour = 7;
+        place(0, wakeHour, 'sleep', '수면');
+      } else if (canPreMidnight && chance(0.6)) {
+        const bedtime = roundToFiveMin(Math.max(prevDayLastEnd + 0.3, randRange(21.5, 23.75)));
+        if (bedtime < 23.9) {
+          allBlocks.push({ date: prevDate as string, start: bedtime, end: 24, type: 'sleep', label: '수면' });
+          wakeHour = pickWakeHour();
+          place(0, wakeHour, 'sleep', '수면');
+        } else {
+          wakeHour = pickWakeHour();
+          const shortSleep = chance(0.15);
+          const longSleep = !shortSleep && chance(0.15);
+          const sleepDuration = shortSleep ? randRange(4, 5.5) : longSleep ? randRange(9, 10.5) : randRange(6, 8);
+          const sleepStart = Math.max(0, wakeHour - sleepDuration);
+          place(sleepStart, wakeHour - sleepStart, 'sleep', '수면');
+        }
+      } else {
+        wakeHour = pickWakeHour();
+        const shortSleep = chance(0.15);
+        const longSleep = !shortSleep && chance(0.15);
+        const sleepDuration = shortSleep ? randRange(4, 5.5) : longSleep ? randRange(9, 10.5) : randRange(6, 8);
+        const sleepStart = Math.max(0, wakeHour - sleepDuration);
+        place(sleepStart, wakeHour - sleepStart, 'sleep', '수면');
+      }
+
+      // How "on track" today is — decays Mon->Fri in a decaying week, flat in
+      // the steady week, plus occasional wildcard drive/slump days.
+      let studyWeight = isWeekend
+        ? randRange(0.15, 0.45)
+        : isSteadyWeek
+          ? randRange(0.62, 0.82)
+          : Math.max(0.2, randRange(0.65, 0.85) - mondayOffset * 0.1);
+      if (chance(0.08)) studyWeight = randRange(0.8, 0.95);
+      else if (chance(0.1)) studyWeight = randRange(0.05, 0.15);
+
+      // Each candidate slot independently may or may not happen, and — aside
+      // from meals — independently rolls study vs. rest, so the order and
+      // makeup of the day varies instead of following a fixed template.
+      const isForcedSleepEve = date === FORCED_SLEEP_FROM_DATE;
+      const events: SeedEvent[] = [];
+      if (chance(0.5)) events.push({ hint: wakeHour + randRange(0.1, 0.5), duration: 0.5, meal: '아침' });
+      if (chance(0.8)) events.push({ hint: wakeHour + randRange(0.4, 1.6), duration: randRange(1, 3), study: chance(studyWeight) });
+      if (chance(0.78)) events.push({ hint: randRange(12, 13.3), duration: randRange(0.5, 1), meal: '점심' });
+      if (chance(0.55)) events.push({ hint: randRange(13.3, 14.3), duration: randRange(0.5, 2), study: chance(studyWeight) });
+      if (chance(0.75)) events.push({ hint: randRange(14.5, 17.5), duration: randRange(1.5, 3.5), study: chance(studyWeight) });
+      if (chance(0.75)) events.push({ hint: randRange(18, 19.3), duration: randRange(0.5, 1), meal: '저녁' });
+      if (chance(0.7)) {
+        const hint = randRange(19.5, 21.5);
+        const duration = isForcedSleepEve ? Math.min(randRange(0.5, 2.5), Math.max(0.25, 22.8 - hint)) : randRange(0.5, 2.5);
+        events.push({ hint, duration, study: chance(studyWeight) });
+      }
+      if (!isForcedSleepEve && studyWeight > 0.4 && chance(0.25)) events.push({ hint: randRange(21.5, 23), duration: randRange(1, 2.5), study: true });
+
+      // Keeps ordinary weekdays from accidentally going fully study-free —
+      // that's reserved for the explicit burnout days and low-energy rolls.
+      if (!isWeekend && studyWeight > 0.2 && !events.some((e) => e.study)) {
+        events.push({ hint: randRange(15, 19), duration: randRange(1, 2.5), study: true });
+      }
+
+      events.sort((a, b) => a.hint - b.hint);
+      for (const ev of events) {
+        if (ev.meal) place(ev.hint, ev.duration, 'rest', ev.meal);
+        else if (ev.study) place(ev.hint, ev.duration, 'study', pick(SEED_STUDY_TOPICS));
+        else place(ev.hint, ev.duration, 'rest', pick(REST_ACTIVITY_POOL));
+      }
+    }
+
+    allBlocks.push(...dayBlocks);
+    prevDate = date;
+    prevDayLastEnd = dayBlocks.length ? dayBlocks[dayBlocks.length - 1].end : 0;
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return allBlocks.map((block, index) => ({ ...block, id: index + 1 }));
+}
+
+const DEFAULT_BLOCKS: TimeBlock[] = buildSeedBlocks();
 const blocksStorageKey = (accountKey: string) => `goalsetter:${accountKey}:blocks`;
+const analysisStorageKey = (accountKey: string) => `goalsetter:${accountKey}:analysis`;
 
 function TimeBlockCreateForm({
   defaultDate,
@@ -518,8 +718,8 @@ function TimeBlockCreateDialog({
 }
 
 function CalendarTab({ accountKey }: { accountKey: string }) {
-  const today = useMemo(() => new Date(2026, 8, 1), []);
-  const [month, setMonth] = useState(new Date(2026, 8, 1));
+  const today = useMemo(() => new Date(2026, 8, 3), []);
+  const [month, setMonth] = useState(new Date(2026, 8, 3));
   const [view, setView] = useState<CalendarView>('month');
   const [prompt, setPrompt] = useState(''); const [message, setMessage] = useState('');
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -627,7 +827,7 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
           <div className="view-switch" role="group" aria-label="달력 보기 방식">
             {([['month', '월력'], ['quarter', '분기력'], ['year', '연력']] as const).map(([value, label]) => <Button key={value} size="sm" variant={view === value ? 'secondary' : 'ghost'} onClick={() => setView(value)} aria-pressed={view === value}>{label}</Button>)}
           </div>
-          <div className="calendar-controls"><Button variant="outline" size="icon" aria-label="이전 기간" onClick={() => shiftMonth(-1)}><ChevronLeft /></Button><Button variant="outline" onClick={() => setMonth(new Date(2026, 8, 1))}>오늘</Button><Button variant="outline" size="icon" aria-label="다음 기간" onClick={() => shiftMonth(1)}><ChevronRight /></Button></div>
+          <div className="calendar-controls"><Button variant="outline" size="icon" aria-label="이전 기간" onClick={() => shiftMonth(-1)}><ChevronLeft /></Button><Button variant="outline" onClick={() => setMonth(new Date(2026, 8, 3))}>오늘</Button><Button variant="outline" size="icon" aria-label="다음 기간" onClick={() => shiftMonth(1)}><ChevronRight /></Button></div>
         </div>
         <div className="calendar-legend" aria-label="시간 기록 범례"><span><i className="legend-dot sleep" />수면</span><span><i className="legend-dot study" />공부</span><span><i className="legend-dot rest" />휴식</span><Button size="icon" variant="outline" aria-label="새 시간 기록 추가" onClick={openCreate}><Plus aria-hidden="true" /></Button></div>
       </div>
@@ -665,6 +865,307 @@ function CalendarTab({ accountKey }: { accountKey: string }) {
   );
 }
 
+type DayUsage = {
+  date: string;
+  sleepMinutes: number;
+  mealMinutes: number;
+  restMinutes: number;
+  studyMinutes: number;
+  studyStartMinutes: number | null;
+};
+const MEAL_KEYWORDS = /식사|밥|점심|아침|저녁|브런치|meal/i;
+
+function buildDayUsage(blocks: TimeBlock[]): DayUsage[] {
+  const byDate = new Map<string, TimeBlock[]>();
+  blocks.forEach((block) => {
+    const list = byDate.get(block.date) ?? [];
+    list.push(block);
+    byDate.set(block.date, list);
+  });
+  return Array.from(byDate.entries())
+    .map(([date, dayBlocks]) => {
+      let sleepMinutes = 0;
+      let mealMinutes = 0;
+      let restMinutes = 0;
+      let studyMinutes = 0;
+      let studyStart: number | null = null;
+      dayBlocks.forEach((block) => {
+        const minutes = (block.end - block.start) * 60;
+        if (block.type === 'sleep') sleepMinutes += minutes;
+        else if (block.type === 'study') {
+          studyMinutes += minutes;
+          if (studyStart === null || block.start < studyStart) studyStart = block.start;
+        } else if (MEAL_KEYWORDS.test(block.label)) mealMinutes += minutes;
+        else restMinutes += minutes;
+      });
+      return {
+        date,
+        sleepMinutes,
+        mealMinutes,
+        restMinutes,
+        studyMinutes,
+        studyStartMinutes: studyStart === null ? null : Math.round(studyStart * 60),
+      };
+    })
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+const average = (values: number[]) => (values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0);
+
+type InsightCategory = 'sleep' | 'meal' | 'rest' | 'study' | 'schedule';
+type Insight = { category: InsightCategory; observation: string; suggestion: string };
+type OptimizeResult = { insights: Insight[]; plan: string[]; expectedGainMinutes: number };
+
+const INSIGHT_CATEGORY_META: Record<InsightCategory, { label: string; icon: LucideIcon; color: string; tint: string }> = {
+  sleep: { label: '수면', icon: Moon, color: '#5b6b93', tint: 'rgba(91,107,147,.14)' },
+  meal: { label: '식사', icon: Coffee, color: '#b8791f', tint: 'rgba(217,164,65,.18)' },
+  rest: { label: '휴식', icon: Wind, color: '#6b7280', tint: 'rgba(107,114,128,.14)' },
+  study: { label: '공부', icon: Target, color: '#3f7a56', tint: 'rgba(85,145,105,.16)' },
+  schedule: { label: '일정', icon: Clock3, color: '#6d28d9', tint: 'rgba(124,58,237,.14)' },
+};
+
+const addDays = (date: Date, amount: number) => { const next = new Date(date); next.setDate(next.getDate() + amount); return next; };
+const addMonths = (date: Date, amount: number) => { const next = new Date(date); next.setMonth(next.getMonth() + amount); return next; };
+const startOfWeekMonday = (date: Date) => { const day = date.getDay(); return addDays(date, day === 0 ? -6 : 1 - day); };
+const startOfMonth = (date: Date) => new Date(date.getFullYear(), date.getMonth(), 1);
+const endOfMonth = (date: Date) => new Date(date.getFullYear(), date.getMonth() + 1, 0);
+const startOfQuarter = (date: Date) => new Date(date.getFullYear(), Math.floor(date.getMonth() / 3) * 3, 1);
+const endOfQuarter = (date: Date) => new Date(date.getFullYear(), Math.floor(date.getMonth() / 3) * 3 + 3, 0);
+const formatShortDateKo = (iso: string) => { const [year, month, day] = iso.split('-').map(Number); return `${String(year).slice(2)}.${month}.${day}`; };
+
+type RangeSelection = { start: string; end: string; label: string };
+type RangePreset = { key: string; buttonLabel: string; selection: RangeSelection };
+
+function buildRangePresets(today: Date): RangePreset[] {
+  const monday = startOfWeekMonday(today);
+  return [
+    { key: 'week', buttonLabel: '이번 주', selection: { start: isoDate(monday), end: isoDate(addDays(monday, 6)), label: '이번 주의 분석' } },
+    { key: 'month', buttonLabel: '이번 달', selection: { start: isoDate(startOfMonth(today)), end: isoDate(endOfMonth(today)), label: '이번 달의 분석' } },
+    { key: 'quarter', buttonLabel: '이번 분기', selection: { start: isoDate(startOfQuarter(today)), end: isoDate(endOfQuarter(today)), label: '이번 분기의 분석' } },
+    { key: 'last7', buttonLabel: '최근 7일', selection: { start: isoDate(addDays(today, -6)), end: isoDate(today), label: '7일 간의 분석' } },
+    { key: 'last30', buttonLabel: '최근 한 달', selection: { start: isoDate(addMonths(today, -1)), end: isoDate(today), label: '한 달 간의 분석' } },
+    { key: 'last90', buttonLabel: '최근 3개월', selection: { start: isoDate(addMonths(today, -3)), end: isoDate(today), label: '3개월 간의 분석' } },
+  ];
+}
+
+type PersistedAnalysis = { result: OptimizeResult; rangeLabel: string };
+
+function AnalysisTab({ accountKey }: { accountKey: string }) {
+  const [blocks] = useState<TimeBlock[]>(() => loadJSON(blocksStorageKey(accountKey), DEFAULT_BLOCKS));
+  const today = useMemo(() => new Date(2026, 8, 3), []);
+  const rangePresets = useMemo(() => buildRangePresets(today), [today]);
+
+  const [rangeKey, setRangeKey] = useState('all');
+  const [customRange, setCustomRange] = useState<RangeSelection | null>(null);
+  const [customDialogOpen, setCustomDialogOpen] = useState(false);
+  const [customStartInput, setCustomStartInput] = useState('');
+  const [customEndInput, setCustomEndInput] = useState('');
+  const [customError, setCustomError] = useState('');
+
+  const activeSelection: RangeSelection | null = useMemo(() => {
+    if (rangeKey === 'custom') return customRange;
+    return rangePresets.find((preset) => preset.key === rangeKey)?.selection ?? null;
+  }, [rangeKey, customRange, rangePresets]);
+
+  const openCustomDialog = () => {
+    setCustomStartInput(customRange?.start ?? isoDate(addDays(today, -6)));
+    setCustomEndInput(customRange?.end ?? isoDate(today));
+    setCustomError('');
+    setCustomDialogOpen(true);
+  };
+  const applyCustomRange = (event: FormEvent) => {
+    event.preventDefault();
+    if (!customStartInput || !customEndInput) { setCustomError('시작과 종료 날짜를 모두 선택해주세요.'); return; }
+    if (customEndInput < customStartInput) { setCustomError('종료 날짜는 시작 날짜보다 늦어야 해요.'); return; }
+    setCustomRange({
+      start: customStartInput,
+      end: customEndInput,
+      label: `${formatShortDateKo(customStartInput)}부터 ${formatShortDateKo(customEndInput)}까지의 분석`,
+    });
+    setRangeKey('custom');
+    setCustomDialogOpen(false);
+  };
+
+  const filteredBlocks = useMemo(() => {
+    if (!activeSelection) return blocks;
+    return blocks.filter((block) => block.date >= activeSelection.start && block.date <= activeSelection.end);
+  }, [blocks, activeSelection]);
+  const days = useMemo(() => buildDayUsage(filteredBlocks), [filteredBlocks]);
+  const hasNoDataInRange = activeSelection !== null && days.length === 0;
+  const summary = useMemo(() => {
+    const startDays = days.filter((day) => day.studyStartMinutes !== null);
+    return {
+      sleepMinutes: average(days.filter((day) => day.sleepMinutes > 0).map((day) => day.sleepMinutes)),
+      mealMinutes: average(days.filter((day) => day.mealMinutes > 0).map((day) => day.mealMinutes)),
+      restMinutes: average(days.filter((day) => day.restMinutes > 0).map((day) => day.restMinutes)),
+      studyMinutes: average(days.filter((day) => day.studyMinutes > 0).map((day) => day.studyMinutes)),
+      studyStartMinutes: startDays.length ? average(startDays.map((day) => day.studyStartMinutes as number)) : null,
+      dayCount: days.length,
+    };
+  }, [days]);
+
+  const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
+  const [error, setError] = useState('');
+  const [analysis, setAnalysis] = useState<PersistedAnalysis | null>(() => loadJSON(analysisStorageKey(accountKey), null));
+  useEffect(() => { saveJSON(analysisStorageKey(accountKey), analysis); }, [accountKey, analysis]);
+
+  const requestOptimization = async () => {
+    setStatus('loading');
+    setError('');
+    try {
+      const response = await fetch('/api/analysis/optimize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ summary, days }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '분석 요청에 실패했어요.');
+      setAnalysis({ result: data as OptimizeResult, rangeLabel: activeSelection ? activeSelection.label : '전체 기간의 분석' });
+      setStatus('idle');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '분석 요청에 실패했어요.');
+      setStatus('error');
+    }
+  };
+
+  const stats: { key: string; label: string; value: string; empty: boolean; icon: LucideIcon; color: string; tint: string }[] = [
+    { key: 'sleep', label: '평균 수면 시간', value: summary.sleepMinutes > 0 ? formatMinutesKo(summary.sleepMinutes) : '기록 없음', empty: summary.sleepMinutes <= 0, icon: Moon, color: '#5b6b93', tint: 'rgba(91,107,147,.14)' },
+    { key: 'meal', label: '평균 식사 시간', value: summary.mealMinutes > 0 ? formatMinutesKo(summary.mealMinutes) : '기록 없음', empty: summary.mealMinutes <= 0, icon: Utensils, color: '#b8791f', tint: 'rgba(217,164,65,.18)' },
+    { key: 'rest', label: '평균 휴식 시간', value: summary.restMinutes > 0 ? formatMinutesKo(summary.restMinutes) : '기록 없음', empty: summary.restMinutes <= 0, icon: Coffee, color: '#6b7280', tint: 'rgba(107,114,128,.14)' },
+    { key: 'study', label: '평균 공부 시간', value: summary.studyMinutes > 0 ? formatMinutesKo(summary.studyMinutes) : '기록 없음', empty: summary.studyMinutes <= 0, icon: BookOpen, color: '#3f7a56', tint: 'rgba(85,145,105,.16)' },
+    { key: 'start', label: '평균 공부 시작 시각', value: summary.studyStartMinutes !== null ? formatClockKo(summary.studyStartMinutes) : '기록 없음', empty: summary.studyStartMinutes === null, icon: Clock3, color: '#6d28d9', tint: 'rgba(124,58,237,.14)' },
+    { key: 'days', label: '분석 대상 일수', value: `${summary.dayCount}일`, empty: summary.dayCount === 0, icon: CalendarDays, color: '#8a7a5c', tint: 'rgba(154,142,110,.16)' },
+  ];
+
+  return (
+    <div className="planner-grid">
+      <section className="goal-editor" aria-labelledby="analysis-heading">
+        <div className="section-kicker"><Brain aria-hidden="true" /> AI 분석</div>
+        <h1 id="analysis-heading">쌓인 기록으로, 다음 계획을 더 똑똑하게.</h1>
+        <p className="section-copy">타임 캘린더에 쌓인 수면·식사·휴식·공부 기록을 바탕으로 AI가 공부 시간을 늘릴 수 있는 개선 방안을 제안해요.</p>
+        <div className="range-picker" role="group" aria-label="분석 기간 선택">
+          <button type="button" className={rangeKey === 'all' ? 'range-chip is-active' : 'range-chip'} onClick={() => setRangeKey('all')}>전체</button>
+          {rangePresets.map((preset) => (
+            <button
+              type="button"
+              key={preset.key}
+              className={rangeKey === preset.key ? 'range-chip is-active' : 'range-chip'}
+              onClick={() => setRangeKey(preset.key)}
+            >
+              {preset.buttonLabel}
+            </button>
+          ))}
+          <button type="button" className={rangeKey === 'custom' ? 'range-chip is-active' : 'range-chip'} onClick={openCustomDialog}>
+            <CalendarRange aria-hidden="true" /> 직접 설정
+          </button>
+        </div>
+        {activeSelection && <p className="range-picker-caption">선택한 기간: {activeSelection.label}</p>}
+        <div className="stat-grid">
+          {stats.map((stat) => {
+            const StatIcon = stat.icon;
+            return (
+              <div className="stat-tile" key={stat.key} style={{ '--stat-color': stat.color, '--stat-tint': stat.tint } as CSSProperties}>
+                <div className="stat-tile-head">
+                  <span className="stat-icon"><StatIcon aria-hidden="true" /></span>
+                  <span className="stat-label">{stat.label}</span>
+                </div>
+                <div className={stat.empty ? 'stat-value is-empty' : 'stat-value'}>{stat.value}</div>
+              </div>
+            );
+          })}
+        </div>
+        {hasNoDataInRange ? (
+          <p className="text-caption text-danger">선택한 기간에는 시간 기록이 없어요. 다른 기간을 선택해보세요.</p>
+        ) : summary.dayCount < 3 ? (
+          <p className="text-caption text-muted-foreground">타임 캘린더에 최소 3일 이상 기록을 남기면 더 정확한 분석을 받을 수 있어요.</p>
+        ) : null}
+        <div className="form-footer">
+          <span className={error ? 'save-note is-visible text-danger' : 'save-note'}>{error}</span>
+          <Button type="button" size="lg" className="save-goal" disabled={status === 'loading' || days.length === 0} onClick={requestOptimization}>
+            {status === 'loading' ? '분석 중...' : <>{analysis ? '다시 분석 요청하기' : 'AI 최적화 방안 요청하기'} <Sparkles aria-hidden="true" /></>}
+          </Button>
+        </div>
+      </section>
+      <Dialog open={customDialogOpen} onOpenChange={setCustomDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>분석 기간 직접 설정</DialogTitle>
+            <DialogDescription>시작 날짜와 종료 날짜를 골라 그 기간의 기록만 분석해요.</DialogDescription>
+          </DialogHeader>
+          <form onSubmit={applyCustomRange} id="custom-range-form">
+            <FieldGroup>
+              <Field orientation="responsive">
+                <FieldLabel htmlFor="range-start">시작 날짜</FieldLabel>
+                <Input id="range-start" type="date" value={customStartInput} onChange={(event) => setCustomStartInput(event.target.value)} required />
+              </Field>
+              <Field orientation="responsive">
+                <FieldLabel htmlFor="range-end">종료 날짜</FieldLabel>
+                <Input id="range-end" type="date" value={customEndInput} onChange={(event) => setCustomEndInput(event.target.value)} required />
+              </Field>
+              {customError && <p className="text-caption text-danger">{customError}</p>}
+            </FieldGroup>
+          </form>
+          <DialogFooter>
+            <Button type="submit" form="custom-range-form">적용</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <aside className="goal-list" aria-label="AI 제안">
+        <div className="goal-list-heading">
+          <div><span className="eyebrow">AI SUGGESTIONS</span><h2>{analysis ? analysis.rangeLabel : '제안 & 개선 계획'}</h2></div>
+          {analysis && analysis.result.insights.length > 0 && <span className="goal-count">{analysis.result.insights.length}</span>}
+        </div>
+        {!analysis && status !== 'loading' && <p className="analysis-empty">아직 요청한 분석이 없어요. 왼쪽에서 최적화 방안을 요청해보세요.</p>}
+        {status === 'loading' && <p className="analysis-empty">기록을 분석하고 있어요...</p>}
+        {analysis && (
+          <>
+            {analysis.result.expectedGainMinutes > 0 ? (
+              <div className="result-badge gain">
+                <TrendingUp aria-hidden="true" />
+                <span>예상 추가 공부 시간</span>
+                <strong>+{formatMinutesKo(analysis.result.expectedGainMinutes)}</strong>
+              </div>
+            ) : (
+              <div className="result-badge steady">
+                <Check aria-hidden="true" />
+                <span>이미 효율적인 습관을 유지하고 있어요</span>
+              </div>
+            )}
+            {analysis.result.insights.map((insight, index) => {
+              const meta = INSIGHT_CATEGORY_META[insight.category] ?? INSIGHT_CATEGORY_META.schedule;
+              const CategoryIcon = meta.icon;
+              return (
+                <article
+                  className="insight-card"
+                  key={index}
+                  style={{ '--cat-color': meta.color, '--cat-tint': meta.tint } as CSSProperties}
+                >
+                  <div className="insight-card-head">
+                    <span className="insight-icon"><CategoryIcon aria-hidden="true" /></span>
+                    <span className="insight-tag">{meta.label}</span>
+                  </div>
+                  <p className="insight-observation">{insight.observation}</p>
+                  <p className="insight-suggestion"><ArrowRight aria-hidden="true" />{insight.suggestion}</p>
+                </article>
+              );
+            })}
+            {analysis.result.plan.length > 0 && (
+              <div className="plan-panel">
+                <div className="section-kicker"><ListChecks aria-hidden="true" /> 오늘의 액션 아이템</div>
+                <ul className="plan-checklist">
+                  {analysis.result.plan.map((item, index) => (
+                    <li key={index}><span className="plan-checkbox" aria-hidden="true" />{item}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </>
+        )}
+      </aside>
+    </div>
+  );
+}
+
 const noopSubscribe = () => () => {};
 const getServerAuthSnapshot = () => false;
 
@@ -679,5 +1180,5 @@ function AuthButton() {
 
 export default function Home() {
   const accountKey = useSyncExternalStore(noopSubscribe, getAccountKey, getServerAccountKey);
-  return <main className="app-shell"><Tabs defaultValue="planner" className="app-tabs"><header className="topbar"><a href="#" className="brand" aria-label="Goalsetter 홈"><span className="brand-mark"><Clock3 aria-hidden="true" /></span><span>Goalsetter</span></a><TabsList className="main-nav" aria-label="주요 메뉴"><TabsTrigger value="planner"><Target aria-hidden="true" />목표 계획</TabsTrigger><TabsTrigger value="calendar"><CalendarDays aria-hidden="true" />타임 캘린더</TabsTrigger></TabsList><AuthButton /></header><div className="content-wrap"><TabsContent value="planner"><PlannerTab key={accountKey} accountKey={accountKey} /></TabsContent><TabsContent value="calendar"><CalendarTab key={accountKey} accountKey={accountKey} /></TabsContent></div></Tabs></main>;
+  return <main className="app-shell"><Tabs defaultValue="planner" className="app-tabs"><header className="topbar"><a href="#" className="brand" aria-label="Goalsetter 홈"><span className="brand-mark"><Clock3 aria-hidden="true" /></span><span>Goalsetter</span></a><TabsList className="main-nav" aria-label="주요 메뉴"><TabsTrigger value="planner"><Target aria-hidden="true" />목표 계획</TabsTrigger><TabsTrigger value="calendar"><CalendarDays aria-hidden="true" />타임 캘린더</TabsTrigger><TabsTrigger value="analysis"><Brain aria-hidden="true" />AI 분석</TabsTrigger></TabsList><AuthButton /></header><div className="content-wrap"><TabsContent value="planner"><PlannerTab key={accountKey} accountKey={accountKey} /></TabsContent><TabsContent value="calendar"><CalendarTab key={accountKey} accountKey={accountKey} /></TabsContent><TabsContent value="analysis"><AnalysisTab key={accountKey} accountKey={accountKey} /></TabsContent></div></Tabs></main>;
 }
