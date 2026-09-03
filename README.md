@@ -196,7 +196,14 @@ AI 학습 패턴 분석
       ▼
 학습 계획 최적화
 ```
+## 👥 Team Members
 
+| 이름 | GitHub | 담당 기능 | 기술 |
+|------|---------|-----------|------|
+| 손혁재 | [@MSSSAN](https://github.com/MSSSAN) | 아이디어 초안 제시, 서비스 제작(공통), 발표 |
+| 이상희 | [@sh-ai-x](https://github.com/sh-ai-x) | 백엔드 음성인식 api |
+| 정은총 | [@YoRangS](https://github.com/YoRangS) | 데이터 요약 대시보드, AI 분석 API 연결, 결과 UI 설계, 타임 캘린더 목업 데이터를 실제 사람의 불규칙한 생활 패턴으로 구성 |
+| 김현주 | [@kimhyunjoo](https://github.com/kkhhjjoo) | 로그인, 회원가입, 타임캘린더 input 입력 |
 ---
 
 ## 🛠 Tech Stack
