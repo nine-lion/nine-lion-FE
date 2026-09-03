@@ -61,7 +61,9 @@ import { formatClockKo, formatMinutesKo } from '@/lib/time';
 type Goal = { id: number; exam: string; date: string; scope: string; target: string; color?: string };
 type BlockType = 'sleep' | 'study' | 'rest';
 type ThemeColor = 'green' | 'purple';
-type TimeBlock = { id: number; date: string; endDate?: string; start: number; end: number; type: BlockType; label: string; goalId?: number };
+type CategorySource = 'system' | 'goal' | 'custom';
+type CalendarCategory = { id: string; name: string; color: string; source: CategorySource; blockType: BlockType; goalId?: number; archived?: boolean };
+type TimeBlock = { id: number; date: string; endDate?: string; start: number; end: number; type: BlockType; label: string; goalId?: number; categoryId?: string };
 const BLOCK_TYPE_LABEL: Record<BlockType, string> = { study: '공부', sleep: '수면', rest: '휴식' };
 const KOREAN_DAYS = ['일', '월', '화', '수', '목', '금', '토'];
 const MONTHS = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8월', '9월', '10월', '11월', '12월'];
@@ -124,31 +126,35 @@ function useVoiceCapture<T>(endpoint: string, onResult: (result: T) => void) {
   };
 
   const startVoiceMeter = (stream: MediaStream) => {
-    const AudioContextConstructor = window.AudioContext;
-    const audioContext = new AudioContextConstructor();
-    const analyser = audioContext.createAnalyser();
-    const source = audioContext.createMediaStreamSource(stream);
+    try {
+      const audioContext = new AudioContext();
+      const analyser = audioContext.createAnalyser();
+      const source = audioContext.createMediaStreamSource(stream);
 
-    analyser.fftSize = 256;
-    analyser.smoothingTimeConstant = 0.72;
-    const waveform = new Uint8Array(analyser.fftSize);
-    source.connect(analyser);
-    audioContextRef.current = audioContext;
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.72;
+      const waveform = new Uint8Array(analyser.fftSize);
+      source.connect(analyser);
+      audioContextRef.current = audioContext;
 
-    const updateLevel = () => {
-      analyser.getByteTimeDomainData(waveform);
-      let sumOfSquares = 0;
-      for (const sample of waveform) {
-        const centered = (sample - 128) / 128;
-        sumOfSquares += centered * centered;
-      }
-      const rms = Math.sqrt(sumOfSquares / waveform.length);
-      const normalized = Math.min(1, Math.max(0, (rms - 0.012) * 7.5));
-      setVoiceLevel((previous) => previous * 0.55 + normalized * 0.45);
-      meterFrameRef.current = requestAnimationFrame(updateLevel);
-    };
+      const updateLevel = () => {
+        analyser.getByteTimeDomainData(waveform);
+        let sumOfSquares = 0;
+        for (const sample of waveform) {
+          const centered = (sample - 128) / 128;
+          sumOfSquares += centered * centered;
+        }
+        const rms = Math.sqrt(sumOfSquares / waveform.length);
+        const normalized = Math.min(1, Math.max(0, (rms - 0.012) * 7.5));
+        setVoiceLevel((previous) => previous * 0.55 + normalized * 0.45);
+        meterFrameRef.current = requestAnimationFrame(updateLevel);
+      };
 
-    updateLevel();
+      void audioContext.resume();
+      updateLevel();
+    } catch {
+      setVoiceLevel(0);
+    }
   };
 
   useEffect(() => () => {
@@ -160,7 +166,7 @@ function useVoiceCapture<T>(endpoint: string, onResult: (result: T) => void) {
 
   const start = async () => {
     setErrorMessage('');
-    if (!navigator.mediaDevices?.getUserMedia) {
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
       setErrorMessage('이 브라우저는 음성 녹음을 지원하지 않아요.');
       setStatus('error');
       return;
@@ -176,11 +182,15 @@ function useVoiceCapture<T>(endpoint: string, onResult: (result: T) => void) {
         stopVoiceMeter();
         stream.getTracks().forEach((track) => track.stop());
         recordingStreamRef.current = null;
+        recorderRef.current = null;
         setStatus('processing');
         try {
           const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+          chunksRef.current = [];
+          if (blob.size === 0) throw new Error('녹음된 음성이 없어요. 다시 시도해주세요.');
           const body = new FormData();
-          body.append('audio', blob, 'recording.webm');
+          const extension = blob.type.includes('mp4') ? 'm4a' : blob.type.includes('ogg') ? 'ogg' : 'webm';
+          body.append('audio', blob, `recording.${extension}`);
           body.append('referenceDate', APP_TODAY_ISO);
           const response = await fetch(endpoint, { method: 'POST', body });
           const data = await response.json();
@@ -197,17 +207,19 @@ function useVoiceCapture<T>(endpoint: string, onResult: (result: T) => void) {
       startVoiceMeter(stream);
       startRecordingTimer();
       setStatus('recording');
-    } catch {
+    } catch (error) {
       stopRecordingTimer();
       stopVoiceMeter();
       recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
       recordingStreamRef.current = null;
-      setErrorMessage('마이크 권한이 필요해요.');
+      setErrorMessage(error instanceof DOMException && error.name === 'NotAllowedError' ? '마이크 권한이 필요해요.' : '사용할 수 있는 마이크를 찾지 못했어요.');
       setStatus('error');
     }
   };
 
-  const stop = () => { recorderRef.current?.stop(); };
+  const stop = () => {
+    if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
+  };
 
   return { status, errorMessage, start, stop, voiceLevel, recordingSeconds };
 }
@@ -220,6 +232,30 @@ const DEFAULT_GOAL_COLOR = '#145c34';
 const DEFAULT_GOALS: Goal[] = [{ id: 1, exam: '일반기계기사 필기', date: '2026-09-26', scope: '재료역학 · 기계열역학 · 기계유체역학 · 기계재료 및 유압기기', target: '기출 7개년 2회독 + 오답노트 완성', color: DEFAULT_GOAL_COLOR }];
 const goalsStorageKey = (accountKey: string) => `goalsetter:${accountKey}:goals`;
 const THEME_STORAGE_KEY = 'goalsetter:theme';
+const SYSTEM_CATEGORIES: CalendarCategory[] = [
+  { id: 'system:sleep', name: '수면', color: '#b6bbb4', source: 'system', blockType: 'sleep' },
+  { id: 'system:study', name: '공부', color: DEFAULT_GOAL_COLOR, source: 'system', blockType: 'study' },
+  { id: 'system:rest', name: '휴식', color: '#d9a441', source: 'system', blockType: 'rest' },
+];
+const CATEGORY_PALETTE = ['#2563eb', '#db2777', '#0d9488', '#ea580c', '#4f46e5', '#ca8a04', '#0891b2', '#be123c', '#7c3aed', '#65a30d', '#9333ea', '#c2410c'];
+const categoriesStorageKey = (accountKey: string) => `goalsetter:${accountKey}:calendar-categories`;
+
+function loadCalendarCategories(accountKey: string) {
+  const stored = loadJSON<CalendarCategory[]>(categoriesStorageKey(accountKey), []);
+  const storedSystems = new Map(stored.filter((category) => category.source === 'system').map((category) => [category.id, category]));
+  const systems = SYSTEM_CATEGORIES.map((category) => ({ ...category, color: storedSystems.get(category.id)?.color ?? category.color }));
+  const customs = stored.filter((category) => category.source === 'custom' && category.id && category.name && /^#[0-9a-f]{6}$/i.test(category.color));
+  return [...systems, ...customs];
+}
+
+function goalCategories(goals: Goal[]): CalendarCategory[] {
+  return goals.map((goal) => ({ id: `goal:${goal.id}`, name: goal.exam, color: goal.color ?? DEFAULT_GOAL_COLOR, source: 'goal', blockType: 'study', goalId: goal.id }));
+}
+
+function nextCategoryColor(categories: CalendarCategory[]) {
+  const used = new Set(categories.map((category) => category.color.toLowerCase()));
+  return CATEGORY_PALETTE.find((color) => !used.has(color)) ?? `#${((categories.length * 2654435761) & 0xffffff).toString(16).padStart(6, '0')}`;
+}
 
 function PlannerTab({ goals, setGoals }: { goals: Goal[]; setGoals: Dispatch<SetStateAction<Goal[]>> }) {
   const [form, setForm] = useState({ exam: '', date: '', scope: '', target: '' });
@@ -267,7 +303,7 @@ function PlannerTab({ goals, setGoals }: { goals: Goal[]; setGoals: Dispatch<Set
               aria-pressed={voiceStatus === 'recording'}
               disabled={voiceStatus === 'processing'}
               onClick={voiceStatus === 'recording' ? stopVoice : startVoice}
-              style={{ '--voice-ring-scale': String(1.02 + goalVoiceLevel * 0.14), '--voice-ring-opacity': String(0.32 + goalVoiceLevel * 0.6) } as CSSProperties}
+              style={{ '--voice-ring-scale': String(1.06 + goalVoiceLevel * 0.42), '--voice-ring-opacity': String(0.32 + goalVoiceLevel * 0.6) } as CSSProperties}
             >
               <span className="voice-level-ring" aria-hidden="true" />
               {voiceStatus === 'recording' ? <><Square aria-hidden="true" /> 녹음 중지</> : voiceStatus === 'processing' ? '인식 중...' : <><Mic aria-hidden="true" /> 음성으로 입력</>}
@@ -345,16 +381,25 @@ function assignLegacyGoalIds(blocks: TimeBlock[], goals: Goal[]) {
   return blocks.map((block) => block.type === 'study' && block.goalId === undefined ? { ...block, goalId: legacyGoalId } : block);
 }
 
-function goalForBlock(block: TimeBlock, goals: Goal[]) {
-  if (block.type !== 'study') return undefined;
-  return goals.find((goal) => goal.id === block.goalId) ?? oldestGoal(goals);
+function legacyCategoryId(block: TimeBlock) {
+  if (block.goalId !== undefined) return `goal:${block.goalId}`;
+  return `system:${block.type}`;
 }
 
-function blockColor(block: TimeBlock, goals: Goal[]) {
-  return goalForBlock(block, goals)?.color ?? DEFAULT_GOAL_COLOR;
+function withCategoryIds(blocks: TimeBlock[]) {
+  return blocks.map((block) => ({ ...block, categoryId: block.categoryId ?? legacyCategoryId(block) }));
 }
 
-type ParsedCalendarEvent = Omit<TimeBlock, 'id' | 'goalId' | 'endDate'> & { endDate: string; goal?: string | null };
+function categoryForBlock(block: TimeBlock, categories: CalendarCategory[]) {
+  const categoryId = block.categoryId ?? legacyCategoryId(block);
+  return categories.find((category) => category.id === categoryId) ?? categories.find((category) => category.id === `system:${block.type}`);
+}
+
+function blockColor(block: TimeBlock, categories: CalendarCategory[]) {
+  return categoryForBlock(block, categories)?.color ?? DEFAULT_GOAL_COLOR;
+}
+
+type ParsedCalendarEvent = Omit<TimeBlock, 'id' | 'goalId' | 'categoryId' | 'endDate'> & { endDate: string; goal?: string | null; category: string; categoryColor?: string | null };
 
 function isParsedTimeBlock(value: unknown): value is ParsedCalendarEvent {
   if (!value || typeof value !== 'object') return false;
@@ -372,7 +417,10 @@ function isParsedTimeBlock(value: unknown): value is ParsedCalendarEvent {
     Date.parse(`${block.endDate}T00:00:00Z`) + block.end * 60 * 60 * 1000 > Date.parse(`${block.date}T00:00:00Z`) + block.start * 60 * 60 * 1000 &&
     (block.type === 'study' || block.type === 'sleep' || block.type === 'rest') &&
     typeof block.label === 'string' &&
-    block.label.trim().length > 0;
+    block.label.trim().length > 0 &&
+    typeof (value as { category?: unknown }).category === 'string' &&
+    (value as { category: string }).category.trim().length > 0 &&
+    ((value as { categoryColor?: unknown }).categoryColor == null || /^#[0-9a-f]{6}$/i.test(String((value as { categoryColor?: unknown }).categoryColor)));
 }
 
 type TimeBlockSegment = { block: TimeBlock; date: string; start: number; end: number; part: 'whole' | 'start' | 'middle' | 'end' };
@@ -428,7 +476,7 @@ function getMonthCells(month: Date) {
   });
 }
 
-function TimeMonthGrid({ month, blocks, goals, today, variant, onBlockClick }: { month: Date; blocks: TimeBlock[]; goals: Goal[]; today: Date; variant: CalendarView; onBlockClick?: (id: number) => void }) {
+function TimeMonthGrid({ month, blocks, categories, today, variant, onBlockClick }: { month: Date; blocks: TimeBlock[]; categories: CalendarCategory[]; today: Date; variant: CalendarView; onBlockClick?: (id: number) => void }) {
   const cells = getMonthCells(month);
   return (
     <div className={`calendar-grid calendar-grid--${variant}`} role="grid" aria-label={`${month.getFullYear()}년 ${MONTHS[month.getMonth()]} 시간 기록`}>
@@ -446,8 +494,8 @@ function TimeMonthGrid({ month, blocks, goals, today, variant, onBlockClick }: {
                 key={`${block.id}-${part}`}
                 type="button"
                 className={`time-block ${block.type} ${part === 'whole' ? '' : `overnight-${part}`}`}
-                style={{ left: `${(start / 24) * 100}%`, width: `${((end - start) / 24) * 100}%`, ...(block.type === 'study' ? { backgroundColor: blockColor(block, goals) } : {}) }}
-                title={`${goalForBlock(block, goals)?.exam ? `${goalForBlock(block, goals)?.exam} · ` : ''}${block.label} ${timeBlockRange(block)} (클릭해서 조절)`}
+                style={{ left: `${(start / 24) * 100}%`, width: `${((end - start) / 24) * 100}%`, backgroundColor: blockColor(block, categories) }}
+                title={`${categoryForBlock(block, categories)?.name ?? BLOCK_TYPE_LABEL[block.type]} · ${block.label} ${timeBlockRange(block)} (클릭해서 조절)`}
                 onClick={(event) => { event.stopPropagation(); onBlockClick?.(block.id); }}
               />
             ))}</div>
@@ -459,7 +507,7 @@ function TimeMonthGrid({ month, blocks, goals, today, variant, onBlockClick }: {
   );
 }
 
-function YearMatrix({ year, blocks, goals, today }: { year: number; blocks: TimeBlock[]; goals: Goal[]; today: Date }) {
+function YearMatrix({ year, blocks, categories, today }: { year: number; blocks: TimeBlock[]; categories: CalendarCategory[]; today: Date }) {
   const days = Array.from({ length: 31 }, (_, index) => index + 1);
   return (
     <div className="year-matrix-wrap">
@@ -479,7 +527,7 @@ function YearMatrix({ year, blocks, goals, today }: { year: number; blocks: Time
               const weekend = date.getDay() === 0 ? 'sunday' : date.getDay() === 6 ? 'saturday' : '';
               return (
                 <div key={day} className={`year-day-cell ${weekend} ${current ? 'current' : ''}`} role="gridcell" aria-label={`${monthIndex + 1}월 ${day}일`}>
-                  {dayBlocks.map(({ block, start, end, part }) => <div key={`${block.id}-${part}`} className={`year-time-block ${block.type} ${part === 'whole' ? '' : `overnight-${part}`}`} style={{ left: `${(start / 24) * 100}%`, width: `${((end - start) / 24) * 100}%`, ...(block.type === 'study' ? { backgroundColor: blockColor(block, goals) } : {}) }} title={`${goalForBlock(block, goals)?.exam ? `${goalForBlock(block, goals)?.exam} · ` : ''}${block.label} ${timeBlockRange(block)}`} />)}
+                  {dayBlocks.map(({ block, start, end, part }) => <div key={`${block.id}-${part}`} className={`year-time-block ${block.type} ${part === 'whole' ? '' : `overnight-${part}`}`} style={{ left: `${(start / 24) * 100}%`, width: `${((end - start) / 24) * 100}%`, backgroundColor: blockColor(block, categories) }} title={`${categoryForBlock(block, categories)?.name ?? BLOCK_TYPE_LABEL[block.type]} · ${block.label} ${timeBlockRange(block)}`} />)}
                 </div>
               );
             })}
@@ -492,19 +540,18 @@ function YearMatrix({ year, blocks, goals, today }: { year: number; blocks: Time
 
 function TimeBlockEditForm({
   block,
-  goals,
+  categories,
   onSave,
   onDelete,
 }: {
   block: TimeBlock;
-  goals: Goal[];
+  categories: CalendarCategory[];
   onSave: (id: number, patch: Omit<TimeBlock, 'id'>) => void;
   onDelete: (id: number) => void;
 }) {
   const [date, setDate] = useState(block.date);
   const [endDate, setEndDate] = useState(timeBlockEndDate(block));
-  const [type, setType] = useState<TimeBlock['type']>(block.type);
-  const [goalId, setGoalId] = useState(String(block.goalId ?? oldestGoal(goals)?.id ?? ''));
+  const [categoryId, setCategoryId] = useState(block.categoryId ?? legacyCategoryId(block));
   const [label, setLabel] = useState(block.label);
   const [start, setStart] = useState(hourToTimeValue(block.start));
   const [end, setEnd] = useState(hourToTimeValue(block.end));
@@ -515,7 +562,9 @@ function TimeBlockEditForm({
     const startHour = timeValueToHour(start);
     const endHour = timeValueToHour(end);
     if (`${endDate}T${end}` <= `${date}T${start}`) { setError('종료 날짜와 시간은 시작보다 늦어야 해요.'); return; }
-    onSave(block.id, { date, endDate, start: startHour, end: endHour, type, label: label.trim() || BLOCK_TYPE_LABEL[type], goalId: type === 'study' && goalId ? Number(goalId) : undefined });
+    const category = categories.find((candidate) => candidate.id === categoryId);
+    if (!category) { setError('카테고리를 선택해주세요.'); return; }
+    onSave(block.id, { date, endDate, start: startHour, end: endHour, type: category.blockType, label: label.trim() || category.name, goalId: category.goalId, categoryId: category.id });
   };
 
   return (
@@ -543,26 +592,11 @@ function TimeBlockEditForm({
             <Input id="block-end" type="time" step={300} value={end} onChange={(event) => setEnd(event.target.value)} required />
           </Field>
           <Field orientation="responsive">
-            <FieldLabel htmlFor="block-type">종류</FieldLabel>
-            <select
-              id="block-type"
-              value={type}
-              onChange={(event) => setType(event.target.value as TimeBlock['type'])}
-              className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-            >
-              <option value="study">공부</option>
-              <option value="sleep">수면</option>
-              <option value="rest">휴식</option>
+            <FieldLabel htmlFor="block-category">카테고리</FieldLabel>
+            <select id="block-category" value={categoryId} onChange={(event) => setCategoryId(event.target.value)} className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50">
+              {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
             </select>
           </Field>
-          {type === 'study' && goals.length > 0 && (
-            <Field orientation="responsive">
-              <FieldLabel htmlFor="block-goal">연결된 목표</FieldLabel>
-              <select id="block-goal" value={goalId} onChange={(event) => setGoalId(event.target.value)} className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50">
-                {goals.map((goal) => <option key={goal.id} value={goal.id}>{goal.exam}</option>)}
-              </select>
-            </Field>
-          )}
           <Field>
             <FieldLabel htmlFor="block-label">메모</FieldLabel>
             <Input id="block-label" value={label} onChange={(event) => setLabel(event.target.value)} placeholder="예: 재료역학" />
@@ -580,13 +614,13 @@ function TimeBlockEditForm({
 
 function TimeBlockEditDialog({
   block,
-  goals,
+  categories,
   onOpenChange,
   onSave,
   onDelete,
 }: {
   block: TimeBlock | null;
-  goals: Goal[];
+  categories: CalendarCategory[];
   onOpenChange: (open: boolean) => void;
   onSave: (id: number, patch: Omit<TimeBlock, 'id'>) => void;
   onDelete: (id: number) => void;
@@ -594,7 +628,7 @@ function TimeBlockEditDialog({
   return (
     <Dialog open={block !== null} onOpenChange={onOpenChange}>
       <DialogContent>
-        {block && <TimeBlockEditForm key={block.id} block={block} goals={goals} onSave={onSave} onDelete={onDelete} />}
+        {block && <TimeBlockEditForm key={block.id} block={block} categories={categories} onSave={onSave} onDelete={onDelete} />}
       </DialogContent>
     </Dialog>
   );
@@ -808,17 +842,21 @@ const blocksStorageKey = (accountKey: string) => `goalsetter:${accountKey}:block
 
 function TimeBlockCreateForm({
   defaultDate,
-  goals,
+  categories,
+  onAddCategory,
   onCreate,
 }: {
   defaultDate: string;
-  goals: Goal[];
+  categories: CalendarCategory[];
+  onAddCategory: (name: string, color: string) => CalendarCategory | null;
   onCreate: (block: Omit<TimeBlock, 'id'>) => void;
 }) {
   const [date, setDate] = useState(defaultDate);
   const [endDate, setEndDate] = useState(defaultDate);
-  const [type, setType] = useState<TimeBlock['type']>('study');
-  const [goalId, setGoalId] = useState(String(goals[0]?.id ?? ''));
+  const [categoryId, setCategoryId] = useState(categories.find((category) => category.source === 'goal')?.id ?? categories[0]?.id ?? '');
+  const [addingCategory, setAddingCategory] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [newCategoryColor, setNewCategoryColor] = useState(nextCategoryColor(categories));
   const [label, setLabel] = useState('');
   const [start, setStart] = useState('09:00');
   const [end, setEnd] = useState('10:00');
@@ -829,7 +867,19 @@ function TimeBlockCreateForm({
     const startHour = timeValueToHour(start);
     const endHour = timeValueToHour(end);
     if (`${endDate}T${end}` <= `${date}T${start}`) { setError('종료 날짜와 시간은 시작보다 늦어야 해요.'); return; }
-    onCreate({ date, endDate, start: startHour, end: endHour, type, label: label.trim() || BLOCK_TYPE_LABEL[type], goalId: type === 'study' && goalId ? Number(goalId) : undefined });
+    const category = categories.find((candidate) => candidate.id === categoryId);
+    if (!category) { setError('카테고리를 선택해주세요.'); return; }
+    onCreate({ date, endDate, start: startHour, end: endHour, type: category.blockType, label: label.trim() || category.name, goalId: category.goalId, categoryId: category.id });
+  };
+
+  const addCategory = () => {
+    const category = onAddCategory(newCategoryName, newCategoryColor);
+    if (!category) { setError('서로 다른 카테고리 이름을 입력해주세요.'); return; }
+    setCategoryId(category.id);
+    setAddingCategory(false);
+    setNewCategoryName('');
+    setNewCategoryColor(nextCategoryColor([...categories, category]));
+    setError('');
   };
 
   return (
@@ -857,25 +907,20 @@ function TimeBlockCreateForm({
             <Input id="new-block-end" type="time" step={300} value={end} onChange={(event) => setEnd(event.target.value)} required />
           </Field>
           <Field orientation="responsive">
-            <FieldLabel htmlFor="new-block-type">종류</FieldLabel>
-            <select
-              id="new-block-type"
-              value={type}
-              onChange={(event) => setType(event.target.value as TimeBlock['type'])}
-              className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-            >
-              <option value="study">공부</option>
-              <option value="sleep">수면</option>
-              <option value="rest">휴식</option>
-            </select>
-          </Field>
-          {type === 'study' && goals.length > 0 && (
-            <Field orientation="responsive">
-              <FieldLabel htmlFor="new-block-goal">연결된 목표</FieldLabel>
-              <select id="new-block-goal" value={goalId} onChange={(event) => setGoalId(event.target.value)} className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50">
-                {goals.map((goal) => <option key={goal.id} value={goal.id}>{goal.exam}</option>)}
+            <FieldLabel htmlFor="new-block-category">카테고리</FieldLabel>
+            <div className="category-select-stack">
+              <select id="new-block-category" value={categoryId} onChange={(event) => setCategoryId(event.target.value)} className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50">
+                {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
               </select>
-            </Field>
+              <Button type="button" size="sm" variant="outline" className="category-add-toggle" onClick={() => setAddingCategory((open) => !open)}><Plus aria-hidden="true" /> 추가하기</Button>
+            </div>
+          </Field>
+          {addingCategory && (
+            <div className="category-inline-create">
+              <Field><FieldLabel htmlFor="new-category-name">새 카테고리 이름</FieldLabel><Input id="new-category-name" value={newCategoryName} onChange={(event) => setNewCategoryName(event.target.value)} placeholder="예: 통근" /></Field>
+              <Field><FieldLabel htmlFor="new-category-color">색상</FieldLabel><Input id="new-category-color" type="color" value={newCategoryColor} onChange={(event) => setNewCategoryColor(event.target.value)} /></Field>
+              <Button type="button" size="sm" onClick={addCategory} disabled={!newCategoryName.trim()}>카테고리 저장</Button>
+            </div>
           )}
           <Field>
             <FieldLabel htmlFor="new-block-label">메모</FieldLabel>
@@ -895,27 +940,93 @@ function TimeBlockCreateDialog({
   open,
   sessionId,
   defaultDate,
-  goals,
+  categories,
+  onAddCategory,
   onOpenChange,
   onCreate,
 }: {
   open: boolean;
   sessionId: number;
   defaultDate: string;
-  goals: Goal[];
+  categories: CalendarCategory[];
+  onAddCategory: (name: string, color: string) => CalendarCategory | null;
   onOpenChange: (open: boolean) => void;
   onCreate: (block: Omit<TimeBlock, 'id'>) => void;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
-        {open && <TimeBlockCreateForm key={sessionId} defaultDate={defaultDate} goals={goals} onCreate={onCreate} />}
+        {open && <TimeBlockCreateForm key={sessionId} defaultDate={defaultDate} categories={categories} onAddCategory={onAddCategory} onCreate={onCreate} />}
       </DialogContent>
     </Dialog>
   );
 }
 
-function CalendarTab({ accountKey, goals }: { accountKey: string; goals: Goal[] }) {
+function CategoryManagerDialog({
+  open,
+  categories,
+  blocks,
+  onOpenChange,
+  onAdd,
+  onRename,
+  onColorChange,
+  onRemove,
+}: {
+  open: boolean;
+  categories: CalendarCategory[];
+  blocks: TimeBlock[];
+  onOpenChange: (open: boolean) => void;
+  onAdd: (name: string, color: string) => CalendarCategory | null;
+  onRename: (id: string, name: string) => void;
+  onColorChange: (category: CalendarCategory, color: string) => void;
+  onRemove: (category: CalendarCategory) => void;
+}) {
+  const [name, setName] = useState('');
+  const [color, setColor] = useState(nextCategoryColor(categories));
+  const [error, setError] = useState('');
+  const add = () => {
+    const category = onAdd(name, color);
+    if (!category) { setError('이미 사용 중인 이름이거나 올바르지 않은 이름이에요.'); return; }
+    setName('');
+    setColor(nextCategoryColor([...categories, category]));
+    setError('');
+  };
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="category-manager-dialog">
+        <DialogHeader>
+          <DialogTitle>카테고리 관리</DialogTitle>
+          <DialogDescription>범례 이름과 색상을 관리합니다. 목표 카테고리의 색상은 목표 계획에도 함께 반영됩니다.</DialogDescription>
+        </DialogHeader>
+        <div className="category-manager-list">
+          {categories.filter((category) => !category.archived).map((category) => {
+            const isUsed = blocks.some((block) => (block.categoryId ?? legacyCategoryId(block)) === category.id);
+            return (
+              <div className="category-manager-row" key={category.id}>
+                <input type="color" value={category.color} aria-label={`${category.name} 색상`} onChange={(event) => onColorChange(category, event.target.value)} />
+                {category.source === 'custom'
+                  ? <Input value={category.name} aria-label={`${category.name} 이름`} onChange={(event) => onRename(category.id, event.target.value)} />
+                  : <span className="category-manager-name">{category.name}</span>}
+                <span className={`category-source-badge ${category.source}`}>{category.source === 'goal' ? '목표' : category.source === 'system' ? '기본' : '사용자'}</span>
+                {category.source === 'custom'
+                  ? <Button type="button" size="icon" variant="ghost" aria-label={`${category.name} ${isUsed ? '보관' : '삭제'}`} title={isUsed ? '사용 중인 기록은 유지하고 범례에서 보관' : '카테고리 삭제'} onClick={() => onRemove(category)}><Trash2 aria-hidden="true" /></Button>
+                  : <span className="category-lock-note">{category.source === 'goal' ? '이름은 목표 계획에서 변경' : '이름 고정'}</span>}
+              </div>
+            );
+          })}
+        </div>
+        <div className="category-manager-create">
+          <Field><FieldLabel htmlFor="manager-category-name">새 카테고리</FieldLabel><Input id="manager-category-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="예: 통근, 운동" /></Field>
+          <Field><FieldLabel htmlFor="manager-category-color">색상</FieldLabel><Input id="manager-category-color" type="color" value={color} onChange={(event) => setColor(event.target.value)} /></Field>
+          <Button type="button" onClick={add} disabled={!name.trim()}><Plus aria-hidden="true" /> 추가</Button>
+        </div>
+        {error && <p className="text-caption text-danger">{error}</p>}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function CalendarTab({ accountKey, goals, setGoals }: { accountKey: string; goals: Goal[]; setGoals: Dispatch<SetStateAction<Goal[]>> }) {
   const today = useMemo(() => new Date(2026, 8, 3), []);
   const [month, setMonth] = useState(new Date(2026, 8, 3));
   const [view, setView] = useState<CalendarView>('month');
@@ -935,10 +1046,19 @@ function CalendarTab({ accountKey, goals }: { accountKey: string; goals: Goal[] 
   const recordingStartedAtRef = useRef(0);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
+  const [managingCategories, setManagingCategories] = useState(false);
   const [createSessionId, setCreateSessionId] = useState(0);
-  const [undoSnapshot, setUndoSnapshot] = useState<TimeBlock[] | null>(null);
-  const [blocks, setBlocks] = useState<TimeBlock[]>(() => assignLegacyGoalIds(withExplicitEndDates(loadJSON(blocksStorageKey(accountKey), DEFAULT_BLOCKS)), goals));
-  useEffect(() => { saveJSON(blocksStorageKey(accountKey), assignLegacyGoalIds(withExplicitEndDates(blocks), goals)); }, [accountKey, blocks, goals]);
+  const [storedCategories, setStoredCategories] = useState<CalendarCategory[]>(() => loadCalendarCategories(accountKey));
+  const categoryCatalog = useMemo(() => {
+    const system = (id: string) => storedCategories.find((category) => category.id === id) ?? SYSTEM_CATEGORIES.find((category) => category.id === id)!;
+    const custom = storedCategories.filter((category) => category.source === 'custom');
+    return [system('system:sleep'), ...goalCategories(goals), ...custom, system('system:rest'), system('system:study')];
+  }, [goals, storedCategories]);
+  const activeCategories = useMemo(() => categoryCatalog.filter((category) => !category.archived && (category.id !== 'system:study' || goals.length === 0)), [categoryCatalog, goals.length]);
+  const [undoSnapshot, setUndoSnapshot] = useState<{ blocks: TimeBlock[]; categories: CalendarCategory[] } | null>(null);
+  const [blocks, setBlocks] = useState<TimeBlock[]>(() => withCategoryIds(assignLegacyGoalIds(withExplicitEndDates(loadJSON(blocksStorageKey(accountKey), DEFAULT_BLOCKS)), goals)));
+  useEffect(() => { saveJSON(blocksStorageKey(accountKey), withCategoryIds(assignLegacyGoalIds(withExplicitEndDates(blocks), goals))); }, [accountKey, blocks, goals]);
+  useEffect(() => { saveJSON(categoriesStorageKey(accountKey), storedCategories); }, [accountKey, storedCategories]);
   const step = view === 'month' ? 1 : view === 'quarter' ? 3 : 12;
   const shiftMonth = (amount: number) => setMonth((previous) => new Date(previous.getFullYear(), previous.getMonth() + amount * step, 1));
   const quarterStart = Math.floor(month.getMonth() / 3) * 3;
@@ -952,9 +1072,43 @@ function CalendarTab({ accountKey, goals }: { accountKey: string; goals: Goal[] 
     : view === 'quarter'
       ? `${month.getFullYear()}년 ${Math.floor(month.getMonth() / 3) + 1}분기`
       : `${month.getFullYear()}년 연력`;
+  const addCustomCategory = (name: string, color: string, blockType: BlockType = 'rest') => {
+    const normalizedName = name.trim();
+    if (!normalizedName || categoryCatalog.some((category) => !category.archived && category.name.toLocaleLowerCase() === normalizedName.toLocaleLowerCase())) return null;
+    const category: CalendarCategory = { id: `custom:${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name: normalizedName, color: /^#[0-9a-f]{6}$/i.test(color) ? color : nextCategoryColor(categoryCatalog), source: 'custom', blockType };
+    setStoredCategories((previous) => [...previous, category]);
+    return category;
+  };
+  const renameCategory = (id: string, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed || categoryCatalog.some((category) => category.id !== id && !category.archived && category.name.toLocaleLowerCase() === trimmed.toLocaleLowerCase())) return;
+    setStoredCategories((previous) => previous.map((category) => category.id === id ? { ...category, name } : category));
+  };
+  const changeCategoryColor = (category: CalendarCategory, color: string) => {
+    if (category.source === 'goal' && category.goalId !== undefined) {
+      setGoals((previous) => previous.map((goal) => goal.id === category.goalId ? { ...goal, color } : goal));
+      return;
+    }
+    setStoredCategories((previous) => previous.map((candidate) => candidate.id === category.id ? { ...candidate, color } : candidate));
+  };
+  const removeCategory = (category: CalendarCategory) => {
+    const used = blocks.some((block) => (block.categoryId ?? legacyCategoryId(block)) === category.id);
+    setStoredCategories((previous) => used
+      ? previous.map((candidate) => candidate.id === category.id ? { ...candidate, archived: true } : candidate)
+      : previous.filter((candidate) => candidate.id !== category.id));
+  };
   const processCalendarInput = async (input: { text?: string; audio?: Blob }) => {
     const sourceText = input.text?.trim();
     if (!sourceText && !input.audio) return;
+    const availableBlocks = blocks.map((block) => ({
+      id: block.id,
+      date: block.date,
+      endDate: timeBlockEndDate(block),
+      start: block.start,
+      end: block.end,
+      label: block.label,
+      category: categoryForBlock(block, categoryCatalog)?.name ?? BLOCK_TYPE_LABEL[block.type],
+    }));
     setIsProcessing(true);
     setMessage(input.audio ? '음성을 텍스트로 바꾸는 중…' : '일정으로 변환하는 중…');
     try {
@@ -965,36 +1119,60 @@ function CalendarTab({ accountKey, goals }: { accountKey: string; goals: Goal[] 
         formData.append('audio', input.audio, `goalsetter-voice.${extension}`);
         formData.append('today', isoDate(today));
         formData.append('goals', JSON.stringify(goals.map((goal) => goal.exam)));
+        formData.append('categories', JSON.stringify(activeCategories.map((category) => ({ name: category.name, color: category.color }))));
+        formData.append('blocks', JSON.stringify(availableBlocks));
         response = await fetch('/api/calendar-input', { method: 'POST', body: formData });
       } else {
         response = await fetch('/api/calendar-input', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: sourceText, today: isoDate(today), goals: goals.map((goal) => goal.exam) }),
+          body: JSON.stringify({ text: sourceText, today: isoDate(today), goals: goals.map((goal) => goal.exam), categories: activeCategories.map((category) => ({ name: category.name, color: category.color })), blocks: availableBlocks }),
         });
       }
 
-      const payload = await response.json() as { rawText?: string; events?: unknown[]; error?: string };
+      const payload = await response.json() as { rawText?: string; events?: unknown[]; deleteBlockIds?: unknown[]; error?: string };
       const resolvedRawText = payload.rawText || sourceText || '';
       if (input.audio && resolvedRawText) setRawInput(resolvedRawText);
       if (!response.ok) throw new Error(payload.error || '입력을 처리하지 못했어요.');
 
       const parsedEvents = (payload.events ?? []).filter(isParsedTimeBlock);
-      if (parsedEvents.length === 0) throw new Error('추가할 수 있는 시간 기록을 찾지 못했어요.');
+      const existingIds = new Set(blocks.map((block) => block.id));
+      const deleteBlockIds = new Set((payload.deleteBlockIds ?? []).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && existingIds.has(id)));
+      const deletedBlocks = blocks.filter((block) => deleteBlockIds.has(block.id));
+      if (parsedEvents.length === 0 && deletedBlocks.length === 0) throw new Error('추가하거나 삭제할 시간 기록을 찾지 못했어요.');
 
       const idBase = Date.now();
       const lowerRawText = resolvedRawText.toLowerCase();
       const goalsMentionedInInput = goals.filter((goal) => lowerRawText.includes(goal.exam.toLowerCase()));
+      const createdCategories: CalendarCategory[] = [];
+      const workingCategories = [...categoryCatalog];
       const newBlocks: TimeBlock[] = parsedEvents.map((block, index) => {
         const explicitGoal = block.goal ? goals.find((goal) => goal.exam.toLowerCase() === block.goal?.toLowerCase()) : undefined;
         const labelGoal = goals.find((goal) => block.label.toLowerCase().includes(goal.exam.toLowerCase()));
-        const matchedGoal = explicitGoal ?? labelGoal ?? (goalsMentionedInInput.length === 1 ? goalsMentionedInInput[0] : goals[0]);
-        return { id: idBase + index, date: block.date, endDate: block.endDate, start: block.start, end: block.end, type: block.type, label: block.label, goalId: block.type === 'study' ? matchedGoal?.id : undefined };
+        const matchedGoal = explicitGoal ?? labelGoal ?? (goalsMentionedInInput.length === 1 ? goalsMentionedInInput[0] : undefined);
+        const requestedName = block.category.trim();
+        let category = workingCategories.find((candidate) => !candidate.archived && candidate.name.toLocaleLowerCase() === requestedName.toLocaleLowerCase());
+        if (!category && matchedGoal && block.type === 'study') category = workingCategories.find((candidate) => candidate.goalId === matchedGoal.id);
+        if (!category) {
+          category = { id: `custom:${idBase}-${index}`, name: requestedName, color: block.categoryColor ?? nextCategoryColor(workingCategories), source: 'custom', blockType: block.type };
+          workingCategories.push(category);
+          createdCategories.push(category);
+        }
+        return { id: idBase + index, date: block.date, endDate: block.endDate, start: block.start, end: block.end, type: category.blockType, label: block.label, goalId: category.goalId, categoryId: category.id };
       });
-      setUndoSnapshot(blocks);
-      setBlocks((previous) => [...previous, ...newBlocks]);
+      setUndoSnapshot({ blocks, categories: storedCategories });
+      if (createdCategories.length > 0) setStoredCategories((previous) => [...previous, ...createdCategories]);
+      setBlocks((previous) => [...previous.filter((block) => !deleteBlockIds.has(block.id)), ...newBlocks]);
       setPrompt('');
-      setMessage(newBlocks.length === 1 ? `${newBlocks[0].label} 기록을 추가했어요.` : `${newBlocks.length}개의 기록을 추가했어요.`);
+      const categoryNotice = createdCategories.length > 0
+        ? ` 새 카테고리 ${createdCategories.map((category) => `'${category.name}'`).join(', ')}도 추가했어요.`
+        : '';
+      const changes = [];
+      if (deletedBlocks.length === 1) changes.push(`'${deletedBlocks[0].label}' 기록을 삭제했어요.`);
+      else if (deletedBlocks.length > 1) changes.push(`${deletedBlocks.length}개의 기록을 삭제했어요.`);
+      if (newBlocks.length === 1) changes.push(`'${newBlocks[0].label}' 기록을 추가했어요.`);
+      else if (newBlocks.length > 1) changes.push(`${newBlocks.length}개의 기록을 추가했어요.`);
+      setMessage(`${changes.join(' ')}${categoryNotice}`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '입력을 처리하지 못했어요.');
     } finally {
@@ -1040,7 +1218,7 @@ function CalendarTab({ accountKey, goals }: { accountKey: string; goals: Goal[] 
       void context.resume();
       measure();
     } catch {
-      setVoiceLevel(0.08);
+      setVoiceLevel(0);
     }
   };
 
@@ -1071,7 +1249,7 @@ function CalendarTab({ accountKey, goals }: { accountKey: string; goals: Goal[] 
     if (isProcessing) return;
     if (isRecording) {
       stopRecordingTimer();
-      recorderRef.current?.stop();
+      if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
       setIsRecording(false);
       return;
     }
@@ -1079,6 +1257,7 @@ function CalendarTab({ accountKey, goals }: { accountKey: string; goals: Goal[] 
       setMessage('이 브라우저에서는 음성 녹음을 사용할 수 없어요.');
       return;
     }
+    setMessage('마이크 연결 중…');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       recordingStreamRef.current = stream;
@@ -1092,6 +1271,7 @@ function CalendarTab({ accountKey, goals }: { accountKey: string; goals: Goal[] 
         stopVoiceMeter();
         stream.getTracks().forEach((track) => track.stop());
         recordingStreamRef.current = null;
+        recorderRef.current = null;
         const audio = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
         audioChunksRef.current = [];
         if (audio.size > 0) void processCalendarInput({ audio });
@@ -1130,9 +1310,10 @@ function CalendarTab({ accountKey, goals }: { accountKey: string; goals: Goal[] 
   };
   const undoVoiceSchedule = () => {
     if (!undoSnapshot) return;
-    setBlocks(undoSnapshot);
+    setBlocks(undoSnapshot.blocks);
+    setStoredCategories(undoSnapshot.categories);
     setUndoSnapshot(null);
-    setMessage('방금 추가한 기록을 취소했어요.');
+    setMessage('방금 변경한 기록을 되돌렸어요.');
   };
   return (
     <section className="calendar-shell" aria-labelledby="calendar-heading">
@@ -1145,17 +1326,20 @@ function CalendarTab({ accountKey, goals }: { accountKey: string; goals: Goal[] 
           <div className="calendar-controls"><Button variant="outline" size="icon" aria-label="이전 기간" onClick={() => shiftMonth(-1)}><ChevronLeft /></Button><Button variant="outline" onClick={() => setMonth(new Date(2026, 8, 3))}>오늘</Button><Button variant="outline" size="icon" aria-label="다음 기간" onClick={() => shiftMonth(1)}><ChevronRight /></Button></div>
         </div>
         <div className="calendar-legend" aria-label="시간 기록 범례">
-          <span><i className="legend-dot sleep" />수면</span>
-          {goals.length > 0 ? goals.map((goal) => <span key={goal.id}><i className="legend-dot" style={{ backgroundColor: goal.color ?? DEFAULT_GOAL_COLOR }} />{goal.exam}</span>) : <span><i className="legend-dot study" />공부</span>}
-          <span><i className="legend-dot rest" />휴식</span>
-          <Button size="icon" variant="outline" aria-label="새 시간 기록 추가" onClick={openCreate}><Plus aria-hidden="true" /></Button>
+          <div className="legend-items">
+            {activeCategories.map((category) => <span key={category.id}><i className="legend-dot" style={{ backgroundColor: category.color }} />{category.name}</span>)}
+          </div>
+          <div className="legend-actions">
+            <Button size="icon" variant="outline" aria-label="카테고리 관리" title="카테고리 관리" onClick={() => setManagingCategories(true)}>M</Button>
+            <Button size="icon" variant="outline" aria-label="새 시간 기록 추가" onClick={openCreate}><Plus aria-hidden="true" /></Button>
+          </div>
         </div>
       </div>
-      {view === 'month' ? <TimeMonthGrid month={month} blocks={blocks} goals={goals} today={today} variant="month" onBlockClick={setEditingId} /> : view === 'quarter' ? (
+      {view === 'month' ? <TimeMonthGrid month={month} blocks={blocks} categories={categoryCatalog} today={today} variant="month" onBlockClick={setEditingId} /> : view === 'quarter' ? (
         <div className={`multi-calendar multi-calendar--${view}`}>
-          {visibleMonths.map((visibleMonth) => <section className="mini-month" key={`${visibleMonth.getFullYear()}-${visibleMonth.getMonth()}`}><h2>{MONTHS[visibleMonth.getMonth()]}</h2><TimeMonthGrid month={visibleMonth} blocks={blocks} goals={goals} today={today} variant={view} onBlockClick={setEditingId} /></section>)}
+          {visibleMonths.map((visibleMonth) => <section className="mini-month" key={`${visibleMonth.getFullYear()}-${visibleMonth.getMonth()}`}><h2>{MONTHS[visibleMonth.getMonth()]}</h2><TimeMonthGrid month={visibleMonth} blocks={blocks} categories={categoryCatalog} today={today} variant={view} onBlockClick={setEditingId} /></section>)}
         </div>
-      ) : <YearMatrix year={month.getFullYear()} blocks={blocks} goals={goals} today={today} />}
+      ) : <YearMatrix year={month.getFullYear()} blocks={blocks} categories={categoryCatalog} today={today} />}
       <aside className={`raw-input-panel ${isRecording ? 'is-recording' : ''}`} aria-label="변환 전 원문">
         <div className="raw-input-heading">
           <span>RAW INPUT</span>
@@ -1177,8 +1361,9 @@ function CalendarTab({ accountKey, goals }: { accountKey: string; goals: Goal[] 
         </Button>
         <Button type="submit" size="icon" aria-label="시간 기록 추가" disabled={isProcessing || isRecording || !prompt.trim()}><Send /></Button>
       </form>
-      <TimeBlockEditDialog block={editingBlock} goals={goals} onOpenChange={(open) => !open && setEditingId(null)} onSave={updateBlock} onDelete={deleteBlock} />
-      <TimeBlockCreateDialog open={creating} sessionId={createSessionId} defaultDate={isoDate(today)} goals={goals} onOpenChange={setCreating} onCreate={createBlock} />
+      <TimeBlockEditDialog block={editingBlock} categories={categoryCatalog.filter((category) => !category.archived || category.id === editingBlock?.categoryId)} onOpenChange={(open) => !open && setEditingId(null)} onSave={updateBlock} onDelete={deleteBlock} />
+      <TimeBlockCreateDialog open={creating} sessionId={createSessionId} defaultDate={isoDate(today)} categories={activeCategories} onAddCategory={addCustomCategory} onOpenChange={setCreating} onCreate={createBlock} />
+      <CategoryManagerDialog open={managingCategories} categories={activeCategories} blocks={blocks} onOpenChange={setManagingCategories} onAdd={addCustomCategory} onRename={renameCategory} onColorChange={changeCategoryColor} onRemove={removeCategory} />
     </section>
   );
 }
@@ -1539,7 +1724,7 @@ function GoalsetterApp({ accountKey }: { accountKey: string }) {
         </header>
         <div className="content-wrap">
           <TabsContent value="planner"><PlannerTab goals={goals} setGoals={setGoals} /></TabsContent>
-          <TabsContent value="calendar"><CalendarTab accountKey={accountKey} goals={goals} /></TabsContent>
+          <TabsContent value="calendar"><CalendarTab accountKey={accountKey} goals={goals} setGoals={setGoals} /></TabsContent>
           <TabsContent value="analysis"><AnalysisTab key={accountKey} accountKey={accountKey} /></TabsContent>
         </div>
       </Tabs>
