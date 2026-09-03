@@ -1,6 +1,6 @@
 'use client';
 
-import { type Dispatch, FormEvent, type SetStateAction, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { type CSSProperties, type Dispatch, FormEvent, type SetStateAction, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { ArrowRight, BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, LogIn, LogOut, Mic, Paintbrush, Pencil, Plus, Send, Sparkles, Square, Target, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -14,12 +14,14 @@ import { loadJSON, saveJSON } from '@/lib/storage';
 
 type Goal = { id: number; exam: string; date: string; scope: string; target: string; color?: string };
 type BlockType = 'sleep' | 'study' | 'rest';
-type TimeBlock = { id: number; date: string; start: number; end: number; type: BlockType; label: string; goalId?: number };
+type ThemeColor = 'green' | 'purple';
+type TimeBlock = { id: number; date: string; endDate?: string; start: number; end: number; type: BlockType; label: string; goalId?: number };
 const BLOCK_TYPE_LABEL: Record<BlockType, string> = { study: '공부', sleep: '수면', rest: '휴식' };
 const KOREAN_DAYS = ['일', '월', '화', '수', '목', '금', '토'];
 const MONTHS = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8월', '9월', '10월', '11월', '12월'];
 const isoDate = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 const formatHour = (value: number) => `${String(Math.floor(value)).padStart(2, '0')}:${String(Math.round((value - Math.floor(value)) * 60)).padStart(2, '0')}`;
+const formatRecordingTime = (seconds: number) => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
 
 const MINUTE_STEP = 5;
 const roundToStep = (minutes: number) => Math.round(minutes / MINUTE_STEP) * MINUTE_STEP;
@@ -39,8 +41,76 @@ type VoiceStatus = 'idle' | 'recording' | 'processing' | 'error';
 function useVoiceCapture<T>(endpoint: string, onResult: (result: T) => void) {
   const [status, setStatus] = useState<VoiceStatus>('idle');
   const [errorMessage, setErrorMessage] = useState('');
+  const [voiceLevel, setVoiceLevel] = useState(0);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const meterFrameRef = useRef<number | null>(null);
+  const recordingStreamRef = useRef<MediaStream | null>(null);
+  const recordingTimerRef = useRef<number | null>(null);
+  const recordingStartedAtRef = useRef(0);
+
+  const stopRecordingTimer = () => {
+    if (recordingTimerRef.current !== null) {
+      window.clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+  };
+
+  const startRecordingTimer = () => {
+    stopRecordingTimer();
+    setRecordingSeconds(0);
+    recordingStartedAtRef.current = Date.now();
+    recordingTimerRef.current = window.setInterval(() => {
+      setRecordingSeconds(Math.floor((Date.now() - recordingStartedAtRef.current) / 1000));
+    }, 250);
+  };
+
+  const stopVoiceMeter = () => {
+    if (meterFrameRef.current !== null) {
+      cancelAnimationFrame(meterFrameRef.current);
+      meterFrameRef.current = null;
+    }
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
+    setVoiceLevel(0);
+  };
+
+  const startVoiceMeter = (stream: MediaStream) => {
+    const AudioContextConstructor = window.AudioContext;
+    const audioContext = new AudioContextConstructor();
+    const analyser = audioContext.createAnalyser();
+    const source = audioContext.createMediaStreamSource(stream);
+
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.72;
+    const waveform = new Uint8Array(analyser.fftSize);
+    source.connect(analyser);
+    audioContextRef.current = audioContext;
+
+    const updateLevel = () => {
+      analyser.getByteTimeDomainData(waveform);
+      let sumOfSquares = 0;
+      for (const sample of waveform) {
+        const centered = (sample - 128) / 128;
+        sumOfSquares += centered * centered;
+      }
+      const rms = Math.sqrt(sumOfSquares / waveform.length);
+      const normalized = Math.min(1, Math.max(0, (rms - 0.012) * 7.5));
+      setVoiceLevel((previous) => previous * 0.55 + normalized * 0.45);
+      meterFrameRef.current = requestAnimationFrame(updateLevel);
+    };
+
+    updateLevel();
+  };
+
+  useEffect(() => () => {
+    if (meterFrameRef.current !== null) cancelAnimationFrame(meterFrameRef.current);
+    if (recordingTimerRef.current !== null) window.clearInterval(recordingTimerRef.current);
+    void audioContextRef.current?.close();
+    recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+  }, []);
 
   const start = async () => {
     setErrorMessage('');
@@ -51,11 +121,15 @@ function useVoiceCapture<T>(endpoint: string, onResult: (result: T) => void) {
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordingStreamRef.current = stream;
       const recorder = new MediaRecorder(stream);
       chunksRef.current = [];
       recorder.ondataavailable = (event) => { if (event.data.size > 0) chunksRef.current.push(event.data); };
       recorder.onstop = async () => {
+        stopRecordingTimer();
+        stopVoiceMeter();
         stream.getTracks().forEach((track) => track.stop());
+        recordingStreamRef.current = null;
         setStatus('processing');
         try {
           const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
@@ -74,8 +148,14 @@ function useVoiceCapture<T>(endpoint: string, onResult: (result: T) => void) {
       };
       recorder.start();
       recorderRef.current = recorder;
+      startVoiceMeter(stream);
+      startRecordingTimer();
       setStatus('recording');
     } catch {
+      stopRecordingTimer();
+      stopVoiceMeter();
+      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+      recordingStreamRef.current = null;
       setErrorMessage('마이크 권한이 필요해요.');
       setStatus('error');
     }
@@ -83,72 +163,17 @@ function useVoiceCapture<T>(endpoint: string, onResult: (result: T) => void) {
 
   const stop = () => { recorderRef.current?.stop(); };
 
-  return { status, errorMessage, start, stop };
+  return { status, errorMessage, start, stop, voiceLevel, recordingSeconds };
 }
 
 type GoalVoiceResult = { exam: string; date: string; scope: string; target: string };
 const useVoiceGoalCapture = (onResult: (result: GoalVoiceResult) => void) =>
   useVoiceCapture<GoalVoiceResult>('/api/voice/goal', onResult);
 
-type ScheduleVoiceResult = { segments: { start: string; end: string; type: BlockType; label: string }[] };
-const useVoiceScheduleCapture = (onResult: (result: ScheduleVoiceResult) => void) =>
-  useVoiceCapture<ScheduleVoiceResult>('/api/voice/schedule', onResult);
-
-function toHourWithMeridiem(match: RegExpMatchArray): number {
-  const [, before, hourStr, minuteStr, after] = match;
-  const meridiem = (before || after || '').toLowerCase();
-  let hour = Number(hourStr);
-  if (meridiem === '오후' || meridiem === 'pm') {
-    if (hour < 12) hour += 12;
-  } else if (meridiem === '오전' || meridiem === 'am') {
-    if (hour === 12) hour = 0;
-  }
-  return hour + Number(minuteStr || 0) / 60;
-}
-
-function parseNaturalEntry(text: string, fallback: Date): Omit<TimeBlock, 'id'>[] | null {
-  const entryDate = new Date(fallback);
-  let remaining = text;
-
-  const koreanDateMatch = remaining.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
-  const isoDateMatch = !koreanDateMatch ? remaining.match(/(\d{4})[-.\/](\d{1,2})[-.\/](\d{1,2})/) : null;
-  if (koreanDateMatch) {
-    entryDate.setMonth(Number(koreanDateMatch[1]) - 1, Number(koreanDateMatch[2]));
-    remaining = remaining.replace(koreanDateMatch[0], ' ');
-  } else if (isoDateMatch) {
-    entryDate.setFullYear(Number(isoDateMatch[1]), Number(isoDateMatch[2]) - 1, Number(isoDateMatch[3]));
-    remaining = remaining.replace(isoDateMatch[0], ' ');
-  }
-
-  if (/어제|yesterday/i.test(remaining)) entryDate.setDate(entryDate.getDate() - 1);
-  if (/내일|tomorrow/i.test(remaining)) entryDate.setDate(entryDate.getDate() + 1);
-
-  const timeMatches = [...remaining.matchAll(/(오전|오후|am|pm)?\s*(\d{1,2})(?::(\d{2}))?\s*(오전|오후|am|pm)?/gi)];
-  if (timeMatches.length < 2) return null;
-  const start = toHourWithMeridiem(timeMatches[0]);
-  const end = toHourWithMeridiem(timeMatches[1]);
-  if (start > 24 || end > 24 || start === end) return null;
-
-  const type: BlockType = /수면|잠|잔|잤|sleep/i.test(text) ? 'sleep' : /밥|식사|쉬|휴식|rest/i.test(text) ? 'rest' : 'study';
-  const label = BLOCK_TYPE_LABEL[type];
-
-  if (end > start) {
-    return [{ date: isoDate(entryDate), start, end, type, label }];
-  }
-
-  // Overnight span (e.g. 오후 11시~오전 6시): a block can't cross midnight in this
-  // data model, so split it into the tail of this day and the start of the next.
-  const nextDay = new Date(entryDate);
-  nextDay.setDate(nextDay.getDate() + 1);
-  return [
-    { date: isoDate(entryDate), start, end: 24, type, label },
-    { date: isoDate(nextDay), start: 0, end, type, label },
-  ];
-}
-
 const DEFAULT_GOAL_COLOR = '#145c34';
 const DEFAULT_GOALS: Goal[] = [{ id: 1, exam: '일반기계기사 필기', date: '2026-09-26', scope: '재료역학 · 기계열역학 · 기계유체역학 · 기계재료 및 유압기기', target: '기출 7개년 2회독 + 오답노트 완성', color: DEFAULT_GOAL_COLOR }];
 const goalsStorageKey = (accountKey: string) => `goalsetter:${accountKey}:goals`;
+const THEME_STORAGE_KEY = 'goalsetter:theme';
 
 function PlannerTab({ goals, setGoals }: { goals: Goal[]; setGoals: Dispatch<SetStateAction<Goal[]>> }) {
   const [form, setForm] = useState({ exam: '', date: '', scope: '', target: '' });
@@ -170,7 +195,7 @@ function PlannerTab({ goals, setGoals }: { goals: Goal[]; setGoals: Dispatch<Set
   const setGoalColor = (id: number, color: string) => {
     setGoals((previous) => previous.map((goal) => goal.id === id ? { ...goal, color } : goal));
   };
-  const { status: voiceStatus, errorMessage: voiceError, start: startVoice, stop: stopVoice } = useVoiceGoalCapture((result) => {
+  const { status: voiceStatus, errorMessage: voiceError, start: startVoice, stop: stopVoice, voiceLevel: goalVoiceLevel, recordingSeconds: goalRecordingSeconds } = useVoiceGoalCapture((result) => {
     setSaved(false);
     setForm((previous) => ({
       exam: result.exam || previous.exam,
@@ -186,15 +211,22 @@ function PlannerTab({ goals, setGoals }: { goals: Goal[]; setGoals: Dispatch<Set
         <h1 id="goal-form-heading">시험일까지, 할 일을 선명하게.</h1>
         <p className="section-copy">시험이나 대회와 준비 범위를 적으면 실행 가능한 목표의 시작점이 만들어집니다.</p>
         <div className="flex items-center gap-3">
-          <Button
-            type="button"
-            variant={voiceStatus === 'recording' ? 'destructive' : 'outline'}
-            size="sm"
-            disabled={voiceStatus === 'processing'}
-            onClick={voiceStatus === 'recording' ? stopVoice : startVoice}
-          >
-            {voiceStatus === 'recording' ? <><Square aria-hidden="true" /> 녹음 중지</> : voiceStatus === 'processing' ? '인식 중...' : <><Mic aria-hidden="true" /> 음성으로 입력</>}
-          </Button>
+          <div className="goal-voice-control">
+            <output className="recording-timer goal-recording-timer" aria-label="목표 음성 녹음 시간">{formatRecordingTime(goalRecordingSeconds)}</output>
+            <Button
+              type="button"
+              variant={voiceStatus === 'recording' ? 'destructive' : 'outline'}
+              size="sm"
+              className="goal-voice-button voice-reactive-button"
+              aria-pressed={voiceStatus === 'recording'}
+              disabled={voiceStatus === 'processing'}
+              onClick={voiceStatus === 'recording' ? stopVoice : startVoice}
+              style={{ '--voice-ring-scale': String(1.02 + goalVoiceLevel * 0.14), '--voice-ring-opacity': String(0.32 + goalVoiceLevel * 0.6) } as CSSProperties}
+            >
+              <span className="voice-level-ring" aria-hidden="true" />
+              {voiceStatus === 'recording' ? <><Square aria-hidden="true" /> 녹음 중지</> : voiceStatus === 'processing' ? '인식 중...' : <><Mic aria-hidden="true" /> 음성으로 입력</>}
+            </Button>
+          </div>
           {voiceStatus === 'recording' && <span className="text-caption text-muted-foreground">시험 또는 대회명, 일정, 범위, 목표를 말해주세요</span>}
           {voiceError && <span className="text-caption text-danger">{voiceError}</span>}
         </div>
@@ -276,6 +308,69 @@ function blockColor(block: TimeBlock, goals: Goal[]) {
   return goalForBlock(block, goals)?.color ?? DEFAULT_GOAL_COLOR;
 }
 
+type ParsedCalendarEvent = Omit<TimeBlock, 'id' | 'goalId' | 'endDate'> & { endDate: string; goal?: string | null };
+
+function isParsedTimeBlock(value: unknown): value is ParsedCalendarEvent {
+  if (!value || typeof value !== 'object') return false;
+  const block = value as Partial<TimeBlock>;
+  return typeof block.date === 'string' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(block.date) &&
+    typeof block.endDate === 'string' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(block.endDate) &&
+    typeof block.start === 'number' &&
+    typeof block.end === 'number' &&
+    block.start >= 0 &&
+    block.start < 24 &&
+    block.end >= 0 &&
+    block.end < 24 &&
+    Date.parse(`${block.endDate}T00:00:00Z`) + block.end * 60 * 60 * 1000 > Date.parse(`${block.date}T00:00:00Z`) + block.start * 60 * 60 * 1000 &&
+    (block.type === 'study' || block.type === 'sleep' || block.type === 'rest') &&
+    typeof block.label === 'string' &&
+    block.label.trim().length > 0;
+}
+
+type TimeBlockSegment = { block: TimeBlock; date: string; start: number; end: number; part: 'whole' | 'start' | 'middle' | 'end' };
+
+function nextIsoDate(value: string) {
+  const [year, month, day] = value.split('-').map(Number);
+  const next = new Date(Date.UTC(year, month - 1, day + 1));
+  return `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, '0')}-${String(next.getUTCDate()).padStart(2, '0')}`;
+}
+
+function timeBlockEndDate(block: TimeBlock) {
+  if (block.endDate && /^\d{4}-\d{2}-\d{2}$/.test(block.endDate)) return block.endDate;
+  return block.end < block.start ? nextIsoDate(block.date) : block.date;
+}
+
+function withExplicitEndDates(blocks: TimeBlock[]) {
+  return blocks.map((block) => ({ ...block, endDate: timeBlockEndDate(block) }));
+}
+
+function timeBlockSegments(block: TimeBlock): TimeBlockSegment[] {
+  const endDate = timeBlockEndDate(block);
+  if (endDate === block.date) return block.end > block.start ? [{ block, date: block.date, start: block.start, end: block.end, part: 'whole' }] : [];
+  const segments: TimeBlockSegment[] = [];
+  let date = block.date;
+  let days = 0;
+  while (date <= endDate && days < 367) {
+    const isStart = date === block.date;
+    const isEnd = date === endDate;
+    const start = isStart ? block.start : 0;
+    const end = isEnd ? block.end : 24;
+    if (end > start) segments.push({ block, date, start, end, part: isStart ? 'start' : isEnd ? 'end' : 'middle' });
+    date = nextIsoDate(date);
+    days += 1;
+  }
+  return segments;
+}
+
+function timeBlockRange(block: TimeBlock) {
+  const endDate = timeBlockEndDate(block);
+  return endDate === block.date
+    ? `${formatHour(block.start)}–${formatHour(block.end)}`
+    : `${block.date} ${formatHour(block.start)}–${endDate} ${formatHour(block.end)}`;
+}
+
 function getMonthCells(month: Date) {
   const firstDay = new Date(month.getFullYear(), month.getMonth(), 1);
   const start = new Date(firstDay);
@@ -295,22 +390,22 @@ function TimeMonthGrid({ month, blocks, goals, today, variant, onBlockClick }: {
       {cells.map((date) => {
         const dateKey = isoDate(date);
         const outside = date.getMonth() !== month.getMonth();
-        const dayBlocks = outside ? [] : blocks.filter((block) => block.date === dateKey);
+        const dayBlocks = outside ? [] : blocks.flatMap(timeBlockSegments).filter((segment) => segment.date === dateKey);
         const current = dateKey === isoDate(today);
         return (
           <div key={dateKey} className={`day-cell ${outside ? 'outside' : ''} ${current ? 'current' : ''}`} role="gridcell" aria-label={`${date.getMonth() + 1}월 ${date.getDate()}일`}>
             <div className="day-number"><span>{date.getDate()}</span></div>
-            <div className="marker-track">{dayBlocks.map((block) => (
+            <div className="marker-track">{dayBlocks.map(({ block, start, end, part }) => (
               <button
-                key={block.id}
+                key={`${block.id}-${part}`}
                 type="button"
-                className={`time-block ${block.type}`}
-                style={{ left: `${(block.start / 24) * 100}%`, width: `${((block.end - block.start) / 24) * 100}%`, ...(block.type === 'study' ? { backgroundColor: blockColor(block, goals) } : {}) }}
-                title={`${goalForBlock(block, goals)?.exam ? `${goalForBlock(block, goals)?.exam} · ` : ''}${block.label} ${formatHour(block.start)}–${formatHour(block.end)} (클릭해서 조절)`}
+                className={`time-block ${block.type} ${part === 'whole' ? '' : `overnight-${part}`}`}
+                style={{ left: `${(start / 24) * 100}%`, width: `${((end - start) / 24) * 100}%`, ...(block.type === 'study' ? { backgroundColor: blockColor(block, goals) } : {}) }}
+                title={`${goalForBlock(block, goals)?.exam ? `${goalForBlock(block, goals)?.exam} · ` : ''}${block.label} ${timeBlockRange(block)} (클릭해서 조절)`}
                 onClick={(event) => { event.stopPropagation(); onBlockClick?.(block.id); }}
               />
             ))}</div>
-            {variant === 'month' && dayBlocks.length > 0 && <div className="hours-total">{dayBlocks.filter((block) => block.type === 'study').reduce((sum, block) => sum + block.end - block.start, 0).toFixed(1)}h 공부</div>}
+            {variant === 'month' && dayBlocks.length > 0 && <div className="hours-total">{dayBlocks.filter(({ block }) => block.type === 'study').reduce((sum, segment) => sum + segment.end - segment.start, 0).toFixed(1)}h 공부</div>}
           </div>
         );
       })}
@@ -333,12 +428,12 @@ function YearMatrix({ year, blocks, goals, today }: { year: number; blocks: Time
               const valid = date.getMonth() === monthIndex;
               if (!valid) return <div key={day} className="year-day-cell invalid" aria-hidden="true" />;
               const dateKey = isoDate(date);
-              const dayBlocks = blocks.filter((block) => block.date === dateKey);
+              const dayBlocks = blocks.flatMap(timeBlockSegments).filter((segment) => segment.date === dateKey);
               const current = dateKey === isoDate(today);
               const weekend = date.getDay() === 0 ? 'sunday' : date.getDay() === 6 ? 'saturday' : '';
               return (
                 <div key={day} className={`year-day-cell ${weekend} ${current ? 'current' : ''}`} role="gridcell" aria-label={`${monthIndex + 1}월 ${day}일`}>
-                  {dayBlocks.map((block) => <div key={block.id} className={`year-time-block ${block.type}`} style={{ left: `${(block.start / 24) * 100}%`, width: `${((block.end - block.start) / 24) * 100}%`, ...(block.type === 'study' ? { backgroundColor: blockColor(block, goals) } : {}) }} title={`${goalForBlock(block, goals)?.exam ? `${goalForBlock(block, goals)?.exam} · ` : ''}${block.label} ${formatHour(block.start)}–${formatHour(block.end)}`} />)}
+                  {dayBlocks.map(({ block, start, end, part }) => <div key={`${block.id}-${part}`} className={`year-time-block ${block.type} ${part === 'whole' ? '' : `overnight-${part}`}`} style={{ left: `${(start / 24) * 100}%`, width: `${((end - start) / 24) * 100}%`, ...(block.type === 'study' ? { backgroundColor: blockColor(block, goals) } : {}) }} title={`${goalForBlock(block, goals)?.exam ? `${goalForBlock(block, goals)?.exam} · ` : ''}${block.label} ${timeBlockRange(block)}`} />)}
                 </div>
               );
             })}
@@ -357,9 +452,11 @@ function TimeBlockEditForm({
 }: {
   block: TimeBlock;
   goals: Goal[];
-  onSave: (id: number, patch: Omit<TimeBlock, 'id' | 'date'>) => void;
+  onSave: (id: number, patch: Omit<TimeBlock, 'id'>) => void;
   onDelete: (id: number) => void;
 }) {
+  const [date, setDate] = useState(block.date);
+  const [endDate, setEndDate] = useState(timeBlockEndDate(block));
   const [type, setType] = useState<TimeBlock['type']>(block.type);
   const [goalId, setGoalId] = useState(String(block.goalId ?? oldestGoal(goals)?.id ?? ''));
   const [label, setLabel] = useState(block.label);
@@ -371,24 +468,32 @@ function TimeBlockEditForm({
     event.preventDefault();
     const startHour = timeValueToHour(start);
     const endHour = timeValueToHour(end);
-    if (endHour <= startHour) { setError('종료 시간은 시작 시간보다 늦어야 해요.'); return; }
-    onSave(block.id, { start: startHour, end: endHour, type, label: label.trim() || BLOCK_TYPE_LABEL[type], goalId: type === 'study' && goalId ? Number(goalId) : undefined });
+    if (`${endDate}T${end}` <= `${date}T${start}`) { setError('종료 날짜와 시간은 시작보다 늦어야 해요.'); return; }
+    onSave(block.id, { date, endDate, start: startHour, end: endHour, type, label: label.trim() || BLOCK_TYPE_LABEL[type], goalId: type === 'study' && goalId ? Number(goalId) : undefined });
   };
 
   return (
     <>
       <DialogHeader>
         <DialogTitle>시간 기록 조절</DialogTitle>
-        <DialogDescription>{`${block.date.replaceAll('-', '. ')} 기록을 5분 단위로 조절할 수 있어요.`}</DialogDescription>
+        <DialogDescription>시작과 종료 날짜·시간을 하나의 연속된 기록으로 조절할 수 있어요.</DialogDescription>
       </DialogHeader>
       <form onSubmit={submit} id="time-block-form">
         <FieldGroup>
           <Field orientation="responsive">
-            <FieldLabel htmlFor="block-start">시작</FieldLabel>
+            <FieldLabel htmlFor="block-start-date">시작 날짜</FieldLabel>
+            <Input id="block-start-date" type="date" value={date} onChange={(event) => { const value = event.target.value; setDate(value); if (endDate < value) setEndDate(value); }} required />
+          </Field>
+          <Field orientation="responsive">
+            <FieldLabel htmlFor="block-start">시작 시간</FieldLabel>
             <Input id="block-start" type="time" step={300} value={start} onChange={(event) => setStart(event.target.value)} required />
           </Field>
           <Field orientation="responsive">
-            <FieldLabel htmlFor="block-end">종료</FieldLabel>
+            <FieldLabel htmlFor="block-end-date">종료 날짜</FieldLabel>
+            <Input id="block-end-date" type="date" min={date} value={endDate} onChange={(event) => setEndDate(event.target.value)} required />
+          </Field>
+          <Field orientation="responsive">
+            <FieldLabel htmlFor="block-end">종료 시간</FieldLabel>
             <Input id="block-end" type="time" step={300} value={end} onChange={(event) => setEnd(event.target.value)} required />
           </Field>
           <Field orientation="responsive">
@@ -437,7 +542,7 @@ function TimeBlockEditDialog({
   block: TimeBlock | null;
   goals: Goal[];
   onOpenChange: (open: boolean) => void;
-  onSave: (id: number, patch: Omit<TimeBlock, 'id' | 'date'>) => void;
+  onSave: (id: number, patch: Omit<TimeBlock, 'id'>) => void;
   onDelete: (id: number) => void;
 }) {
   return (
@@ -469,6 +574,7 @@ function TimeBlockCreateForm({
   onCreate: (block: Omit<TimeBlock, 'id'>) => void;
 }) {
   const [date, setDate] = useState(defaultDate);
+  const [endDate, setEndDate] = useState(defaultDate);
   const [type, setType] = useState<TimeBlock['type']>('study');
   const [goalId, setGoalId] = useState(String(goals[0]?.id ?? ''));
   const [label, setLabel] = useState('');
@@ -480,28 +586,32 @@ function TimeBlockCreateForm({
     event.preventDefault();
     const startHour = timeValueToHour(start);
     const endHour = timeValueToHour(end);
-    if (endHour <= startHour) { setError('종료 시간은 시작 시간보다 늦어야 해요.'); return; }
-    onCreate({ date, start: startHour, end: endHour, type, label: label.trim() || BLOCK_TYPE_LABEL[type], goalId: type === 'study' && goalId ? Number(goalId) : undefined });
+    if (`${endDate}T${end}` <= `${date}T${start}`) { setError('종료 날짜와 시간은 시작보다 늦어야 해요.'); return; }
+    onCreate({ date, endDate, start: startHour, end: endHour, type, label: label.trim() || BLOCK_TYPE_LABEL[type], goalId: type === 'study' && goalId ? Number(goalId) : undefined });
   };
 
   return (
     <>
       <DialogHeader>
         <DialogTitle>시간 기록 추가</DialogTitle>
-        <DialogDescription>날짜와 시간을 5분 단위로 골라 새 기록을 추가할 수 있어요.</DialogDescription>
+        <DialogDescription>시작과 종료 날짜·시간을 정해 하나의 연속된 기록을 추가할 수 있어요.</DialogDescription>
       </DialogHeader>
       <form onSubmit={submit} id="time-block-create-form">
         <FieldGroup>
           <Field orientation="responsive">
-            <FieldLabel htmlFor="new-block-date">날짜</FieldLabel>
-            <Input id="new-block-date" type="date" value={date} onChange={(event) => setDate(event.target.value)} required />
+            <FieldLabel htmlFor="new-block-date">시작 날짜</FieldLabel>
+            <Input id="new-block-date" type="date" value={date} onChange={(event) => { const value = event.target.value; setDate(value); if (endDate < value) setEndDate(value); }} required />
           </Field>
           <Field orientation="responsive">
-            <FieldLabel htmlFor="new-block-start">시작</FieldLabel>
+            <FieldLabel htmlFor="new-block-start">시작 시간</FieldLabel>
             <Input id="new-block-start" type="time" step={300} value={start} onChange={(event) => setStart(event.target.value)} required />
           </Field>
           <Field orientation="responsive">
-            <FieldLabel htmlFor="new-block-end">종료</FieldLabel>
+            <FieldLabel htmlFor="new-block-end-date">종료 날짜</FieldLabel>
+            <Input id="new-block-end-date" type="date" min={date} value={endDate} onChange={(event) => setEndDate(event.target.value)} required />
+          </Field>
+          <Field orientation="responsive">
+            <FieldLabel htmlFor="new-block-end">종료 시간</FieldLabel>
             <Input id="new-block-end" type="time" step={300} value={end} onChange={(event) => setEnd(event.target.value)} required />
           </Field>
           <Field orientation="responsive">
@@ -567,14 +677,26 @@ function CalendarTab({ accountKey, goals }: { accountKey: string; goals: Goal[] 
   const today = useMemo(() => new Date(2026, 8, 1), []);
   const [month, setMonth] = useState(new Date(2026, 8, 1));
   const [view, setView] = useState<CalendarView>('month');
-  const [prompt, setPrompt] = useState(''); const [message, setMessage] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [rawInput, setRawInput] = useState('');
+  const [message, setMessage] = useState('입력 대기');
+  const [isRecording, setIsRecording] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [voiceLevel, setVoiceLevel] = useState(0);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const meterFrameRef = useRef<number | null>(null);
+  const recordingStreamRef = useRef<MediaStream | null>(null);
+  const recordingTimerRef = useRef<number | null>(null);
+  const recordingStartedAtRef = useRef(0);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
   const [createSessionId, setCreateSessionId] = useState(0);
   const [undoSnapshot, setUndoSnapshot] = useState<TimeBlock[] | null>(null);
-  const [voiceMessage, setVoiceMessage] = useState('');
-  const [blocks, setBlocks] = useState<TimeBlock[]>(() => assignLegacyGoalIds(loadJSON(blocksStorageKey(accountKey), DEFAULT_BLOCKS), goals));
-  useEffect(() => { saveJSON(blocksStorageKey(accountKey), assignLegacyGoalIds(blocks, goals)); }, [accountKey, blocks, goals]);
+  const [blocks, setBlocks] = useState<TimeBlock[]>(() => assignLegacyGoalIds(withExplicitEndDates(loadJSON(blocksStorageKey(accountKey), DEFAULT_BLOCKS)), goals));
+  useEffect(() => { saveJSON(blocksStorageKey(accountKey), assignLegacyGoalIds(withExplicitEndDates(blocks), goals)); }, [accountKey, blocks, goals]);
   const step = view === 'month' ? 1 : view === 'quarter' ? 3 : 12;
   const shiftMonth = (amount: number) => setMonth((previous) => new Date(previous.getFullYear(), previous.getMonth() + amount * step, 1));
   const quarterStart = Math.floor(month.getMonth() / 3) * 3;
@@ -588,23 +710,167 @@ function CalendarTab({ accountKey, goals }: { accountKey: string; goals: Goal[] 
     : view === 'quarter'
       ? `${month.getFullYear()}년 ${Math.floor(month.getMonth() / 3) + 1}분기`
       : `${month.getFullYear()}년 연력`;
+  const processCalendarInput = async (input: { text?: string; audio?: Blob }) => {
+    const sourceText = input.text?.trim();
+    if (!sourceText && !input.audio) return;
+    setIsProcessing(true);
+    setMessage(input.audio ? '음성을 텍스트로 바꾸는 중…' : '일정으로 변환하는 중…');
+    try {
+      let response: Response;
+      if (input.audio) {
+        const formData = new FormData();
+        const extension = input.audio.type.includes('ogg') ? 'ogg' : input.audio.type.includes('mp4') ? 'm4a' : 'webm';
+        formData.append('audio', input.audio, `goalsetter-voice.${extension}`);
+        formData.append('today', isoDate(today));
+        formData.append('goals', JSON.stringify(goals.map((goal) => goal.exam)));
+        response = await fetch('/api/calendar-input', { method: 'POST', body: formData });
+      } else {
+        response = await fetch('/api/calendar-input', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: sourceText, today: isoDate(today), goals: goals.map((goal) => goal.exam) }),
+        });
+      }
+
+      const payload = await response.json() as { rawText?: string; events?: unknown[]; error?: string };
+      const resolvedRawText = payload.rawText || sourceText || '';
+      if (input.audio && resolvedRawText) setRawInput(resolvedRawText);
+      if (!response.ok) throw new Error(payload.error || '입력을 처리하지 못했어요.');
+
+      const parsedEvents = (payload.events ?? []).filter(isParsedTimeBlock);
+      if (parsedEvents.length === 0) throw new Error('추가할 수 있는 시간 기록을 찾지 못했어요.');
+
+      const idBase = Date.now();
+      const lowerRawText = resolvedRawText.toLowerCase();
+      const goalsMentionedInInput = goals.filter((goal) => lowerRawText.includes(goal.exam.toLowerCase()));
+      const newBlocks: TimeBlock[] = parsedEvents.map((block, index) => {
+        const explicitGoal = block.goal ? goals.find((goal) => goal.exam.toLowerCase() === block.goal?.toLowerCase()) : undefined;
+        const labelGoal = goals.find((goal) => block.label.toLowerCase().includes(goal.exam.toLowerCase()));
+        const matchedGoal = explicitGoal ?? labelGoal ?? (goalsMentionedInInput.length === 1 ? goalsMentionedInInput[0] : goals[0]);
+        return { id: idBase + index, date: block.date, endDate: block.endDate, start: block.start, end: block.end, type: block.type, label: block.label, goalId: block.type === 'study' ? matchedGoal?.id : undefined };
+      });
+      setUndoSnapshot(blocks);
+      setBlocks((previous) => [...previous, ...newBlocks]);
+      setPrompt('');
+      setMessage(newBlocks.length === 1 ? `${newBlocks[0].label} 기록을 추가했어요.` : `${newBlocks.length}개의 기록을 추가했어요.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '입력을 처리하지 못했어요.');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   const addNaturalEntry = (event: FormEvent) => {
-    event.preventDefault(); const parsed = parseNaturalEntry(prompt, today);
-    if (!parsed) { setMessage('시간 두 개를 포함해 적어주세요. 예: 오늘 19:00~22:00 공부'); return; }
-    setUndoSnapshot(null);
-    const baseId = Date.now();
-    const matchedGoal = goals.find((goal) => prompt.toLowerCase().includes(goal.exam.toLowerCase())) ?? goals[0];
-    const newEntries: TimeBlock[] = parsed.map((entry, index) => ({ ...entry, id: baseId + index, goalId: entry.type === 'study' ? matchedGoal?.id : undefined }));
-    setBlocks((previous) => [...previous, ...newEntries]);
-    setPrompt('');
-    setMessage(
-      parsed.length > 1
-        ? `${parsed[0].label} ${formatHour(parsed[0].start)}–자정을 넘어 ${formatHour(parsed[1].end)}까지 기록을 추가했어요.`
-        : `${parsed[0].label} ${formatHour(parsed[0].start)}–${formatHour(parsed[0].end)} 기록을 추가했어요.`,
-    );
+    event.preventDefault();
+    void processCalendarInput({ text: prompt });
+  };
+
+  const stopVoiceMeter = () => {
+    if (meterFrameRef.current !== null) cancelAnimationFrame(meterFrameRef.current);
+    meterFrameRef.current = null;
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') void audioContextRef.current.close();
+    audioContextRef.current = null;
+    setVoiceLevel(0);
+  };
+
+  const startVoiceMeter = (stream: MediaStream) => {
+    try {
+      const context = new AudioContext();
+      const analyser = context.createAnalyser();
+      const source = context.createMediaStreamSource(stream);
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.72;
+      source.connect(analyser);
+      audioContextRef.current = context;
+      const samples = new Uint8Array(analyser.fftSize);
+      const measure = () => {
+        analyser.getByteTimeDomainData(samples);
+        let energy = 0;
+        for (const sample of samples) {
+          const amplitude = (sample - 128) / 128;
+          energy += amplitude * amplitude;
+        }
+        const rms = Math.sqrt(energy / samples.length);
+        const level = Math.min(1, Math.max(0, (rms - 0.012) * 7.5));
+        setVoiceLevel((previous) => previous * 0.58 + level * 0.42);
+        meterFrameRef.current = requestAnimationFrame(measure);
+      };
+      void context.resume();
+      measure();
+    } catch {
+      setVoiceLevel(0.08);
+    }
+  };
+
+  const stopRecordingTimer = () => {
+    if (recordingTimerRef.current !== null) {
+      window.clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+  };
+
+  const startRecordingTimer = () => {
+    stopRecordingTimer();
+    setRecordingSeconds(0);
+    recordingStartedAtRef.current = Date.now();
+    recordingTimerRef.current = window.setInterval(() => {
+      setRecordingSeconds(Math.floor((Date.now() - recordingStartedAtRef.current) / 1000));
+    }, 250);
+  };
+
+  useEffect(() => () => {
+    if (meterFrameRef.current !== null) cancelAnimationFrame(meterFrameRef.current);
+    if (recordingTimerRef.current !== null) window.clearInterval(recordingTimerRef.current);
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') void audioContextRef.current.close();
+    recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+  }, []);
+
+  const toggleRecording = async () => {
+    if (isProcessing) return;
+    if (isRecording) {
+      stopRecordingTimer();
+      recorderRef.current?.stop();
+      setIsRecording(false);
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setMessage('이 브라우저에서는 음성 녹음을 사용할 수 없어요.');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordingStreamRef.current = stream;
+      const preferredType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((type) => MediaRecorder.isTypeSupported(type));
+      const recorder = new MediaRecorder(stream, preferredType ? { mimeType: preferredType } : undefined);
+      audioChunksRef.current = [];
+      recorderRef.current = recorder;
+      recorder.ondataavailable = (event) => { if (event.data.size > 0) audioChunksRef.current.push(event.data); };
+      recorder.onstop = () => {
+        stopRecordingTimer();
+        stopVoiceMeter();
+        stream.getTracks().forEach((track) => track.stop());
+        recordingStreamRef.current = null;
+        const audio = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        audioChunksRef.current = [];
+        if (audio.size > 0) void processCalendarInput({ audio });
+        else setMessage('녹음된 음성이 없어요. 다시 시도해주세요.');
+      };
+      recorder.start();
+      startVoiceMeter(stream);
+      startRecordingTimer();
+      setRawInput('');
+      setMessage('녹음 중 · 버튼을 다시 누르면 완료');
+      setIsRecording(true);
+    } catch (error) {
+      stopRecordingTimer();
+      stopVoiceMeter();
+      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+      recordingStreamRef.current = null;
+      setMessage(error instanceof DOMException && error.name === 'NotAllowedError' ? '마이크 권한을 허용해주세요.' : '마이크를 시작하지 못했어요.');
+    }
   };
   const editingBlock = blocks.find((block) => block.id === editingId) ?? null;
-  const updateBlock = (id: number, patch: Omit<TimeBlock, 'id' | 'date'>) => {
+  const updateBlock = (id: number, patch: Omit<TimeBlock, 'id'>) => {
     setUndoSnapshot(null);
     setBlocks((previous) => previous.map((block) => (block.id === id ? { ...block, ...patch } : block)));
     setEditingId(null);
@@ -620,32 +886,11 @@ function CalendarTab({ accountKey, goals }: { accountKey: string; goals: Goal[] 
     setBlocks((previous) => [...previous, { ...block, id: Date.now() }]);
     setCreating(false);
   };
-  const applyVoiceSchedule = (result: ScheduleVoiceResult) => {
-    if (result.segments.length === 0) {
-      setVoiceMessage('인식된 시간 기록이 없어요. 다시 말씀해주세요.');
-      return;
-    }
-    const baseId = Date.now();
-    const newBlocks: TimeBlock[] = result.segments.map((segment, index) => ({
-      id: baseId + index,
-      date: isoDate(today),
-      start: timeValueToHour(segment.start),
-      end: timeValueToHour(segment.end),
-      type: segment.type,
-      label: segment.label,
-      goalId: segment.type === 'study' ? goals.find((goal) => segment.label.toLowerCase().includes(goal.exam.toLowerCase()))?.id ?? goals[0]?.id : undefined,
-    }));
-    setUndoSnapshot(blocks);
-    setBlocks((previous) => [...previous, ...newBlocks]);
-    setVoiceMessage(`${newBlocks.length}개 기록을 추가했어요.`);
-  };
-  const { status: voiceStatus, errorMessage: voiceError, start: startVoiceRaw, stop: stopVoice } = useVoiceScheduleCapture(applyVoiceSchedule);
-  const startVoice = () => { setVoiceMessage(''); startVoiceRaw(); };
   const undoVoiceSchedule = () => {
     if (!undoSnapshot) return;
     setBlocks(undoSnapshot);
     setUndoSnapshot(null);
-    setVoiceMessage('방금 추가한 기록을 취소했어요.');
+    setMessage('방금 추가한 기록을 취소했어요.');
   };
   return (
     <section className="calendar-shell" aria-labelledby="calendar-heading">
@@ -669,31 +914,29 @@ function CalendarTab({ accountKey, goals }: { accountKey: string; goals: Goal[] 
           {visibleMonths.map((visibleMonth) => <section className="mini-month" key={`${visibleMonth.getFullYear()}-${visibleMonth.getMonth()}`}><h2>{MONTHS[visibleMonth.getMonth()]}</h2><TimeMonthGrid month={visibleMonth} blocks={blocks} goals={goals} today={today} variant={view} onBlockClick={setEditingId} /></section>)}
         </div>
       ) : <YearMatrix year={month.getFullYear()} blocks={blocks} goals={goals} today={today} />}
-      <form className="command-bar" onSubmit={addNaturalEntry}><div className="command-icon"><Sparkles aria-hidden="true" /></div><label htmlFor="natural-entry" className="sr-only">자연어로 시간 기록 추가</label><input id="natural-entry" value={prompt} onChange={(event) => { setPrompt(event.target.value); setMessage(''); }} placeholder="예: 오늘 03:00부터 08:00까지 잤어" /><span className="command-hint">자연어로 기록</span><Button type="submit" size="icon" aria-label="시간 기록 추가"><Send /></Button><output className="command-message" aria-live="polite">{message}</output></form>
+      <aside className={`raw-input-panel ${isRecording ? 'is-recording' : ''}`} aria-label="변환 전 원문">
+        <div className="raw-input-heading">
+          <span>RAW INPUT</span>
+          <div className="raw-input-meta">
+            <output aria-live="polite">{message}</output>
+            {undoSnapshot && <button type="button" onClick={undoVoiceSchedule}>실행 취소</button>}
+          </div>
+        </div>
+        <p>{rawInput || '음성 인식 결과가 변환 전에 여기에 표시됩니다.'}</p>
+      </aside>
+      <form className="command-bar" onSubmit={addNaturalEntry}>
+        <div className="command-icon"><Sparkles aria-hidden="true" /></div>
+        <label htmlFor="natural-entry" className="sr-only">자연어로 시간 기록 추가</label>
+        <input id="natural-entry" value={prompt} onChange={(event) => { setPrompt(event.target.value); setMessage('입력 중'); }} placeholder="예: 오늘 03:00부터 08:00까지 잤어" disabled={isProcessing || isRecording} />
+        <output className="recording-timer command-recording-timer" aria-label="캘린더 음성 녹음 시간">{formatRecordingTime(recordingSeconds)}</output>
+        <Button type="button" size="icon" variant={isRecording ? 'destructive' : 'outline'} className="mic-button voice-reactive-button" aria-label={isRecording ? '음성 녹음 완료' : '음성으로 입력'} aria-pressed={isRecording} onClick={toggleRecording} disabled={isProcessing} style={{ '--voice-ring-scale': String(1.08 + voiceLevel * 0.72), '--voice-ring-opacity': String(0.32 + voiceLevel * 0.6) } as CSSProperties}>
+          <span className="voice-level-ring" aria-hidden="true" />
+          {isRecording ? <Square aria-hidden="true" /> : <Mic aria-hidden="true" />}
+        </Button>
+        <Button type="submit" size="icon" aria-label="시간 기록 추가" disabled={isProcessing || isRecording || !prompt.trim()}><Send /></Button>
+      </form>
       <TimeBlockEditDialog block={editingBlock} goals={goals} onOpenChange={(open) => !open && setEditingId(null)} onSave={updateBlock} onDelete={deleteBlock} />
       <TimeBlockCreateDialog open={creating} sessionId={createSessionId} defaultDate={isoDate(today)} goals={goals} onOpenChange={setCreating} onCreate={createBlock} />
-      {(voiceStatus === 'recording' || voiceStatus === 'processing' || voiceError || voiceMessage) && (
-        <div className="voice-fab-status" role="status" aria-live="polite">
-          {voiceStatus === 'recording' && '오늘 한 일을 말해주세요. 다 되면 버튼을 다시 눌러 정지하세요.'}
-          {voiceStatus === 'processing' && '인식 중...'}
-          {voiceStatus !== 'recording' && voiceStatus !== 'processing' && voiceError && <span className="text-danger">{voiceError}</span>}
-          {voiceStatus !== 'recording' && voiceStatus !== 'processing' && !voiceError && voiceMessage && (
-            <span className="flex items-center gap-2">
-              {voiceMessage}
-              {undoSnapshot && <button type="button" className="underline underline-offset-2" onClick={undoVoiceSchedule}>실행 취소</button>}
-            </span>
-          )}
-        </div>
-      )}
-      <button
-        type="button"
-        className={`voice-fab ${voiceStatus === 'recording' ? 'recording' : ''}`}
-        aria-label={voiceStatus === 'recording' ? '녹음 중지' : '음성으로 오늘 기록하기'}
-        disabled={voiceStatus === 'processing'}
-        onClick={voiceStatus === 'recording' ? stopVoice : startVoice}
-      >
-        {voiceStatus === 'recording' ? <Square aria-hidden="true" /> : <Mic aria-hidden="true" />}
-      </button>
     </section>
   );
 }
@@ -721,7 +964,10 @@ export default function Home() {
 
 function GoalsetterApp({ accountKey }: { accountKey: string }) {
   const [goals, setGoals] = useState<Goal[]>(() => loadJSON(goalsStorageKey(accountKey), DEFAULT_GOALS));
+  const [theme, setTheme] = useState<ThemeColor>(() => loadJSON(THEME_STORAGE_KEY, 'green'));
   useEffect(() => { saveJSON(goalsStorageKey(accountKey), goals); }, [accountKey, goals]);
+  useEffect(() => { saveJSON(THEME_STORAGE_KEY, theme); }, [theme]);
+  const toggleTheme = () => setTheme((current) => current === 'green' ? 'purple' : 'green');
 
-  return <main className="app-shell"><Tabs defaultValue="planner" className="app-tabs"><header className="topbar"><a href="#" className="brand" aria-label="Goalsetter 홈"><span className="brand-mark"><Clock3 aria-hidden="true" /></span><span>Goalsetter</span></a><TabsList className="main-nav" aria-label="주요 메뉴"><TabsTrigger value="planner"><Target aria-hidden="true" />목표 계획</TabsTrigger><TabsTrigger value="calendar"><CalendarDays aria-hidden="true" />타임 캘린더</TabsTrigger></TabsList><AuthButton /></header><div className="content-wrap"><TabsContent value="planner"><PlannerTab goals={goals} setGoals={setGoals} /></TabsContent><TabsContent value="calendar"><CalendarTab accountKey={accountKey} goals={goals} /></TabsContent></div></Tabs></main>;
+  return <main className="app-shell" data-theme={theme}><Tabs defaultValue="planner" className="app-tabs"><header className="topbar"><div className="brand"><button type="button" className="brand-mark" onClick={toggleTheme} aria-label={`테마를 ${theme === 'green' ? '보라색' : '녹색'}으로 변경`} aria-pressed={theme === 'purple'} title="테마 색상 전환"><Clock3 aria-hidden="true" /></button><a href="#" className="brand-name" aria-label="Goalsetter 홈">Goalsetter</a></div><TabsList className="main-nav" aria-label="주요 메뉴"><TabsTrigger value="planner"><Target aria-hidden="true" />목표 계획</TabsTrigger><TabsTrigger value="calendar"><CalendarDays aria-hidden="true" />타임 캘린더</TabsTrigger></TabsList><AuthButton /></header><div className="content-wrap"><TabsContent value="planner"><PlannerTab goals={goals} setGoals={setGoals} /></TabsContent><TabsContent value="calendar"><CalendarTab accountKey={accountKey} goals={goals} /></TabsContent></div></Tabs></main>;
 }
