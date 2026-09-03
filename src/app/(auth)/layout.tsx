@@ -7,7 +7,7 @@ export default function AuthLayout({
     <div className="relative flex flex-1 items-center justify-center overflow-hidden bg-background px-6 py-12 sm:px-10">
       <div
         aria-hidden
-        className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top_left,rgb(124_58_237/0.12),transparent_46%),radial-gradient(ellipse_at_bottom_right,rgb(99_102_241/0.1),transparent_50%)]"
+        className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top_left,rgb(20_92_52/0.12),transparent_46%),radial-gradient(ellipse_at_bottom_right,rgb(47_120_75/0.1),transparent_50%)]"
       />
       <div className="relative z-10 grid w-full max-w-6xl items-center gap-12 lg:grid-cols-2 lg:gap-20">
         <section className="flex flex-col gap-5 lg:gap-6">
